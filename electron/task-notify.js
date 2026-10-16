@@ -50,9 +50,9 @@ const FAILED_LABELS = {
 }
 
 // 通知标题（Windows 横幅第一行，加粗），正文在第二行。
-const NOTICE_TITLE_DONE = 'Local AI · 任务完成'
-const NOTICE_TITLE_FAILED = 'Local AI · 任务未完成'
-const NOTICE_TITLE_ASK = 'Local AI · 需要你作答'
+const NOTICE_TITLE_DONE = 'Local AI Open · 任务完成'
+const NOTICE_TITLE_FAILED = 'Local AI Open · 任务未完成'
+const NOTICE_TITLE_ASK = 'Local AI Open · 需要你作答'
 
 /** 折叠空白 + 截断（通知正文只能放一行一截）。空白/非字符串 → 空串。 */
 function truncate(text, maxChars) {

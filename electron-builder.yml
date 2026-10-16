@@ -1,7 +1,7 @@
 # electron-builder 打包配置
 # 运行 `yarn build` 后，产物输出到 release/ 目录
 
-appId: com.localai.desktop.oss
+appId: com.localai.open
 productName: Local AI Open
 
 directories:
@@ -17,7 +17,7 @@ compression: normal
 electronLanguages: ['en-US', 'zh-CN']
 
 # 进入 app.asar 的文件（vite 已把渲染层依赖打进 dist，无需 node_modules）
-# 注意：ERP 知识库（background 里的 源代码目录/源代码目录/映射）不再打包，改为设置页按需下载到 userData/kbase
+# 说明：内置 skills/ 与 harness/ 直接打进包；用户数据（技能 / 记忆 / 会话 / 产物）统一落在 userData 下。
 files:
   - dist/**
   - dist-electron/**
@@ -32,9 +32,21 @@ electronDist: node_modules/electron/dist
 # 自动更新：默认**不配置**发布源（开源版不指向任何企业服务器）。
 # 二次开发若需自动更新，自行填 publish.url（例如你自己的 generic 服务器或 GitHub Releases）：
 #
-publish:
-  provider: generic
-  url: https://example.com/local-ai-open/
+# 自动更新：开源版**默认关闭**（不指向任何服务器）。
+# 二次开发若需要自动更新：去掉下面两行的注释，填上你自己的发布源
+# （generic 服务器或 GitHub Releases；electron-builder 据此生成 app-update.yml）。
+# publish:
+#   provider: generic
+#   url: https://example.com/local-ai-open/
+
+# ============================================================
+#  代码签名（与「能否同时安装」**无关**，只影响 SmartScreen 提示；两个应用可各用不同证书）
+#  开源版**默认不签名**，仓库里不含任何凭据。推荐用环境变量，不要提交证书：
+#      CSC_LINK          证书文件路径或 base64（.pfx）
+#      CSC_KEY_PASSWORD  证书密码
+#  也可在 win.signtoolOptions 里显式配置（certificateFile / certificatePassword /
+#  rfc3161TimeStampServer）。注意本文件不能出现两个 win: 键 —— 要填就并进已有的 win: 段。
+# ============================================================
 
 win:
   icon: build/icon.ico

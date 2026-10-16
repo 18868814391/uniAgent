@@ -760,8 +760,6 @@ export const useAppStore = defineStore('app', () => {
     }
     settings.value.role = role
     await saveSettings(JSON.parse(JSON.stringify(settings.value)))
-    // 测试/产品身份要读对应分支的真实开发代码：切换即自动同步（不阻塞切换，浮窗显示进度）
-    if (roleNeedsRepo(role)) syncRoleRepos(role)
     await newConversation()
   }
 

@@ -41,16 +41,6 @@ test('read_file：path 类型错误 → 错误路径指向 path', () => {
   assert.ok(v.error.issues.some((i) => i.path.join('.') === 'path'))
 })
 
-test('read_file：method 枚举校验（GET/POST 通过，其它拒绝）', () => {
-  const tool = TOOLS.find((t) => t.name === 'read_file')
-  assert.equal(tool.schema.safeParse({ method: 'GET', url: 'his-finance/x/page' }).success, true)
-  assert.equal(tool.schema.safeParse({ method: 'PUT', url: 'x' }).success, false)
-  // body 为任意对象，可透传
-  const v = tool.schema.safeParse({ method: 'POST', url: 'x', body: { pageNo: 1, name: 'aa' } })
-  assert.equal(v.success, true)
-  assert.deepEqual(v.data.body, { pageNo: 1, name: 'aa' })
-})
-
 test('browser_eval：arg 任意对象可选，缺失也通过', () => {
   const tool = TOOLS.find((t) => t.name === 'browser_eval')
   assert.equal(tool.schema.safeParse({ js: 'return 1' }).success, true)

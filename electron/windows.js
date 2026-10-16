@@ -8,7 +8,7 @@ const path = require('path')
 const fs = require('fs')
 const state = require('./state')
 
-const APP_NAME = 'Local AI'
+const APP_NAME = 'Local AI Open'
 
 // 应用图标：优先用打包内置的 icon.ico，dev 模式同样可用；缺失时退回 exe 自身图标
 function resolveIcon() {

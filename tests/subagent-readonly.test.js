@@ -138,7 +138,6 @@ stub('./shell', {
 })
 stub('./network', { searchWeb: async () => '{}' })
 stub('./search', { grepCode: async () => '{}', globFiles: async () => '{}' })
-stub('./erp', {})
 stub('../conversations', { searchConversationHistory: async () => [] })
 stub('../browser-test', {})
 stub('../settings', {})

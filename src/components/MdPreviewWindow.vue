@@ -85,7 +85,7 @@ async function load() {
 }
 
 onMounted(() => {
-  document.title = name ? `📄 ${name} — Local AI` : 'Local AI'
+  document.title = name ? `📄 ${name} — Local AI Open` : 'Local AI Open'
   decorateMarkdownFileLinks(contentRef.value)
   load()
 })

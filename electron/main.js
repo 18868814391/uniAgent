@@ -1,12 +1,24 @@
 // ============================================================
-//  Local AI —— 主进程装配器
-//  启动时序:加载配置/登录/资源 → 注册各域 IPC → 建窗 → 检查更新。
-//  领域逻辑已拆分到 settings / login / kbase / context /
-//  conversations / chat / tools/* 等模块,本文件只做装配与生命周期。
+//  Local AI Open —— 主进程装配器
+//  启动时序:加载配置 → 注册各域 IPC → 建窗 → 检查更新。
+//  领域逻辑已拆分到 settings / context / conversations / chat /
+//  tools/* 等模块,本文件只做装配与生命周期。
 // ============================================================
 const { app, BrowserWindow, dialog, ipcMain } = require('electron')
 const { autoUpdater } = require('electron-updater')
 const log = require('electron-log')
+
+// ============================================================
+//  应用身份（开源版）—— 与企业版**完全隔离**，两者可同时安装、各自独立运行
+//   1) app.setName         → userData 目录名 / 窗口与通知里的应用名
+//   2) setPath('userData') → **必须显式指定**：否则会与企业版共用同一个 %APPDATA% 目录，
+//                            配置 / 会话记录 / 归档会互相覆盖
+//   3) setAppUserModelId   → 任务栏图标分组与系统通知归属（须与 electron-builder.yml 的 appId 一致）
+//  ⚠️ 二次开发请改成你自己的标识（全局唯一即可），并同步 electron-builder.yml。
+// ============================================================
+app.setName('Local AI Open')
+app.setPath('userData', require('path').join(app.getPath('appData'), 'Local AI Open'))
+
 const state = require('./state')
 const settings = require('./settings')
 const conversations = require('./conversations')
@@ -21,7 +33,7 @@ const APP_NAME = settings.APP_NAME
 // 不设它的话，系统通知（任务完成提醒）会挂在 "electron.app.xxx" 名下、通知中心里显示的
 // 是 Electron 而不是本应用，且打包版可能因 AUMID 与安装快捷方式不匹配而**完全不弹**。
 // 只在 Windows 上设；其它平台无此概念。
-if (process.platform === 'win32') app.setAppUserModelId('com.localai.desktop')
+if (process.platform === 'win32') app.setAppUserModelId('com.localai.open')
 
 // 字节 → 人类可读（用于更新日志与前端展示）
 function formatBytes(n) {
@@ -218,12 +230,13 @@ function setupAutoUpdater() {
     if (state.mainWindow) state.mainWindow.webContents.send('app:updateError', { message: err.message || String(err) })
   })
 
-  // 启动 3 秒后再检查，避免拖慢启动
-  setTimeout(() => {
-    autoUpdater.checkForUpdates().catch((err) => {
-      log.error('[autoUpdater] checkForUpdates failed:', err.message || err)
-    })
-  }, 3000)
+  // 开源版默认**不配置发布源**（electron-builder.yml 里 publish 段被注释），因此不做启动自动检查，
+  // 否则每次启动都会去请求一个不存在的更新服务器。二次开发接入自己的发布源后，把下面几行恢复即可。
+  // setTimeout(() => {
+  //   autoUpdater.checkForUpdates().catch((err) => {
+  //     log.error('[autoUpdater] checkForUpdates failed:', err.message || err)
+  //   })
+  // }, 3000)
 }
 
 // ============================================================

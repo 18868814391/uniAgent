@@ -51,7 +51,7 @@ const stub = (request, exports) => {
   require.cache[id] = { id, filename: id, loaded: true, exports }
 }
 
-const FAKE_TOOLS = ['read_file', 'read_image', 'browser_open', 'browser_read_images', 'read_file'].map((name) => ({
+const FAKE_TOOLS = ['read_file', 'read_image', 'browser_open', 'browser_read_images'].map((name) => ({
   type: 'function',
   function: { name, description: name, parameters: { type: 'object', properties: {} } },
 }))
@@ -340,7 +340,6 @@ test('dev 角色 + 读图开启：下发 read_image（本机图片），但不�
   const names = toolNamesOf(bodies[0])
   assert.ok(names.includes('read_image'), 'dev 必须能看本机图片文件（本次事故的直接原因就是没有这个入口）')
   assert.equal(names.includes('browser_read_images'), false, 'dev 没有 browser_* 工具，别下发')
-  assert.equal(names.includes('read_file'), false, '顺手确认 dev 白名单仍然收窄（没有被放松）')
 })
 
 test('dev 角色 + 读图关闭：连 read_image 也不下发（纯文本模型收图片会 400）', async () => {

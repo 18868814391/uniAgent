@@ -15,7 +15,7 @@ const { execFilePromise, runElevated, downloadAndInstall, resolvePython } = requ
 // ============================================================
 //  Constants
 // ============================================================
-const APP_NAME = 'Local AI'
+const APP_NAME = 'Local AI Open'
 const SETTINGS_FILE = 'settings.json'
 const DEFAULT_SKILLS_DIR = path.join(os.homedir(), '.local-ai', 'skills')
 const DEFAULT_MEMORY_DIR = path.join(os.homedir(), '.local-ai', 'memory')
@@ -74,9 +74,9 @@ const MODEL_CONTEXT_WINDOWS = {
 const DEFAULT_CONTEXT_WINDOW = 1024 * 1024
 
 // ============================================================
-//  平台与环境配置（ERP / MES-Boss / MES-WEB）
-//  真实的平台差异（域名、登录形态、能力开关）全部收在 platforms.js，
-//  本文件只做转发 + 默认值兜底，避免同一份 URL 在多处写死。
+//  已移除：企业版的「运行平台与环境」配置
+//  （多事业部平台 + 正式/测试/开发环境域名、登录形态、能力开关 ——
+//   开源版不内置，需二次开发自行接入）
 // ============================================================
 // ============================================================
 //  代码仓库目录（开源版）
@@ -525,7 +525,7 @@ ${visionHowTo}
 
 `
 
-  return `You are Local AI, a helpful AI assistant running as a desktop application.
+  return `You are Local AI Open, a helpful AI assistant running as a desktop application.
 
 ${accessDesc}
 When the user asks you to work with files, use the available tools.
@@ -568,7 +568,6 @@ Key capabilities:
 
 ${accessListTitle}
 ${dirsList}
-${loginNote}
 
 【文件定位 — 先用工具确认真实路径，严禁凭描述拼路径】
 用户提到的文件名常常带有中文、全角括号【】、空格和版本号，例如「【上半年运费分析】2026运费明细含子公司 v2.xlsx」。read_file 是精确匹配，差一个字符就报 File not found。因此处理用户提到的文件时：

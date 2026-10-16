@@ -6,7 +6,6 @@
 const { ipcMain, BrowserWindow } = require('electron')
 const crypto = require('crypto')
 const state = require('./state')
-const platforms = require('./platforms')
 const { TOOLS_DEFINITION } = require('./tool-schemas')
 const { fetchWithRetry, describeFetchError } = require('./net-retry')
 const settings = require('./settings')

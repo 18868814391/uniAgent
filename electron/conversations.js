@@ -271,7 +271,7 @@ function buildConversationMarkdown({ conv, messages, title }) {
   const aiCount = messages.filter((m) => m.role === 'assistant').length
   const lines = []
   lines.push(`# ${title}`, '')
-  lines.push('> 本文件由 Local AI 自动归档生成')
+  lines.push('> 本文件由 Local AI Open 自动归档生成')
   lines.push(`> 归档时间：${formatDateTime(Date.now())}`)
   if (conv && conv.id) lines.push(`> 会话 ID：${conv.id}`)
   if (conv && conv.createdAt) lines.push(`> 创建时间：${formatDateTime(conv.createdAt)}`)

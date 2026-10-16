@@ -54,7 +54,7 @@ const stub = (request, exports) => {
 const FAKE_TOOLS = [
   'read_file', 'write_file', 'edit_file', 'grep_code',
   'execute_command', 'ask_user', 'spawn_sub_agent',
-  'browser_click', 'read_file',
+  'browser_click',
 ].map((name) => ({
   type: 'function',
   function: { name, description: name, parameters: { type: 'object', properties: {} } },
@@ -258,7 +258,6 @@ test('dev 角色只发白名单工具，其它角色不受影响', async () => {
   await chat.handleChatSend(makeEvent(), payload())
   const devTools = bodies[0].tools.map((t) => t.function.name)
   assert.ok(!devTools.includes('browser_click'), 'dev 不该收到 browser_* 工具')
-  assert.ok(!devTools.includes('read_file'), 'dev 不该收到 ERP 工具')
   assert.ok(devTools.includes('read_file') && devTools.includes('edit_file'), 'dev 必须保留改码工具')
   assert.ok(devTools.includes('execute_command'), 'dev 必须保留 execute_command')
   assert.ok(devTools.every((n) => [
@@ -276,7 +275,7 @@ test('dev 角色只发白名单工具，其它角色不受影响', async () => {
   stateStub.settings = { allowedDirs: [], role: 'product', autoExecute: true, subAgentsEnabled: true }
   await chat.handleChatSend(makeEvent(), payload())
   const pmTools = bodies[0].tools.map((t) => t.function.name)
-  assert.ok(pmTools.includes('browser_click') && pmTools.includes('read_file'), '非 dev 角色的工具集不该被收窄')
+  assert.ok(pmTools.includes('browser_click'), '非 dev 角色的工具集不该被收窄')
 })
 
 test('串行组独占执行：browser_* 互不重叠，且整组排在并发组之后', async () => {

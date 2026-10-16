@@ -95,6 +95,21 @@ C:/Users/syf/.workbuddy/binaries/node/versions/22.22.2-3/node.exe --check <文�
 **改本仓库代码时注意**：改动若落在「共享文件」上，下次同步会被上游覆盖 —— 这类改动应当回到
 企业版的 `oss-sync/rules.mjs` 里加规则。详见 `oss/README.md`。
 
+## 应用身份（改之前先看）
+
+本开源版与上游企业版是**两个独立应用**，必须能同时安装。身份由这几处决定，**改一处就要同步另一处**：
+
+| 位置 | 值 |
+| --- | --- |
+| `electron/main.js` | `app.setName('Local AI Open')` + `app.setPath('userData', …)` + `setAppUserModelId('com.localai.open')` |
+| `electron-builder.yml` | `appId: com.localai.open` + `productName: Local AI Open` |
+
+- `userData` **必须显式 `setPath`**，否则会与企业版共用 `%APPDATA%` 目录（配置 / 会话互相覆盖）。
+- AUMID 必须与 `electron-builder.yml` 的 `appId` 一致，否则打包版可能**完全不弹系统通知**。
+- 代码签名与「能否并存」无关（只影响 SmartScreen）；签名请用 `CSC_LINK` / `CSC_KEY_PASSWORD` 环境变量，不要提交证书。
+- 同步机制：这几处由上游 `oss-sync/rules.mjs` 的「应用身份隔离」规则组生成。**在本仓库直接改会被下次同步覆盖**，
+  要改就回上游加规则。
+
 ## 禁忌
 
 - 不做没被要求的优化：不顺手重构、不改无关格式、不「顺便」升级依赖。

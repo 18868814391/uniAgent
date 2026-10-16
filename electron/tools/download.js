@@ -154,7 +154,7 @@ async function downloadUrl({ url, name }) {
           host.endsWith('.localhost') ||
           host === '::1' ||
           /^(127\.|10\.|192\.168\.|169\.254\.)/.test(host) ||
-          /^172\.(1[6-9]|2\d|3[01])\./.test(host) || // 172.16.0.0/12
+          /^172\.(1[6-9]|2\d|3[01])\./.test(host) || // 10.0.0.0/8
           (/^[0-9a-f:]+$/i.test(host) && host.includes(':')) // 其余 IPv6 一律拒绝（官方直链为 IPv4 域名）
         secondLinkOk = u2.protocol === 'https:' && !isPrivateOrLoopback
       } catch {}

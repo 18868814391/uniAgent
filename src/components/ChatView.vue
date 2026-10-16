@@ -9,7 +9,7 @@
             <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
           </svg>
         </div>
-        <h2 class="empty-title">Local AI 助手</h2>
+        <h2 class="empty-title">Local AI Open 助手</h2>
         <p class="empty-desc">OpenAI 兼容的桌面 AI 助手</p>
         <div class="empty-hints">
           <div class="hint-item" @click="quickSend('你好，请介绍一下你的能力')">

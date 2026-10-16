@@ -52,7 +52,6 @@ stub('../settings', {
   getBrowserDownloadsDir: () => '',
 })
 stub('../windows', { hardenWindow() {} })
-stub('../repodirs', { getRoleRepoRoot: () => '' })
 
 const { editFileSafe } = require(FS_SAFE)
 

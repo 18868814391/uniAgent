@@ -73,12 +73,10 @@ stub('./settings', {
   ensureDir: (d) => d,
 })
 stub('./windows', { hardenWindow: () => {} })
-stub('./repodirs', { getRoleRepoRoot: () => null })
 stub('./tools/skills', { listAllSkills: () => [], readSkillByName: () => ({}) })
 stub('./tools/shell', { executeCommand: async () => '{}', killAllChildren: () => {} })
 stub('./tools/network', { searchWeb: async () => '{}' })
 stub('./tools/search', { grepCode: async () => '{}', globFiles: async () => '{}' })
-stub('./tools/erp', {})
 stub('./tools/todo', { updateTodos: () => ({ ok: true, todos: [] }) })
 stub('./tools/legal-npc-search', { legalNpcSearch: async () => '{}' })
 stub('./tools/download', { downloadUrl: async () => '{}' })

@@ -14,8 +14,6 @@
 //   2) 没有因此开出别的洞：授权目录之外的文件仍然 Read / Access denied
 //
 // fs-safe.js 加载时 require('electron')，故用桩模块顶掉依赖。
-// ⚠️ 本文件用非 dev 角色，isPathAllowed 会真正走完整逻辑 → getRoleRepoRoot() 也会被调到，
-//    必须连 '../repodirs' 一起桩掉（否则它会去调 app.getPath 而爆栈）。
 const test = require('node:test')
 const assert = require('node:assert')
 const fs = require('node:fs')
@@ -61,7 +59,6 @@ stub('../settings', {
   getCommandOutputDir: () => TOOL_OUTPUT,
 })
 stub('../windows', { hardenWindow: () => {} })
-stub('../repodirs', { getRoleRepoRoot: () => null })
 
 const fsSafe = require(FS_SAFE)
 

@@ -65,13 +65,13 @@ yarn test           # node:test 单测
 
 | 移除项 | 说明 |
 | --- | --- |
-| 登录体系 | 账号密码 / 验证码 / 租户选择 / token 持久化 / 登录遮罩层（`electron/login.js`、`src/components/LoginMask.vue`） |
+| 登录体系 | 账号密码 / 验证码 / 租户选择 / token 持久化 / 登录遮罩层（`electron/login.js`、`src/components/LoginOverlay.vue`） |
 | 多平台与环境切换 | 企业 ERP / MES 多事业部平台、正式/测试/开发环境表与域名（`electron/platforms.js`） |
-| 企业代码知识库 | 知识库 Git/zip 拉取、脱敏前后端副本（`electron/kbase.js`、内置 `erpquery` 技能） |
-| 代码仓库自动拉取 | 切换角色时自动 clone/pull 企业前后端仓库（`electron/repodirs.js`、`src/components/RepoPane.vue`） |
-| ERP/MES 业务工具 | `read_file` / `grep_code` / `read_file` / `browser_open` / `确认用户权限` / `list_directory`（`electron/tools/erp.js`） |
-| 角色权限分组 | 按登录人姓名匹配的角色切换白名单（`electron/roleGroups.js`） |
-| 法律法规库 Git 拉取 | 依赖企业部署密钥的法规库同步（`electron/legalkb.js`）；**法务角色的官网检索能力保留** |
+| 企业代码知识库 | 知识库 Git/zip 拉取、脱敏前后端副本（`electron/erp-kb.js`、内置 `erp-query` 技能） |
+| 代码仓库自动拉取 | 切换角色时自动 clone/pull 企业前后端仓库（`electron/role-repos.js`、`src/components/RoleRepoSync.vue`） |
+| ERP/MES 业务工具 | `query_erp` / `search_code` / `backend_code` / `open_erp` / `check_erp_permission` / `qa_page_permission`（`electron/tools/erp.js`） |
+| 角色权限分组 | 按登录人姓名匹配的角色切换白名单（`electron/userCheck.js`） |
+| 法律法规库 Git 拉取 | 依赖企业部署密钥的法规库同步（`electron/legal-kb.js`）；**法务角色的官网检索能力保留** |
 | 企业地址与密钥 | 所有内网域名、接口地址、仓库 token、发布/更新服务器地址、企业软件下载直链 |
 
 **保留**的是与具体企业无关的全部能力：对话、文件、代码检索、命令、网页测试、文件格式处理、技能/记忆、
@@ -87,7 +87,7 @@ yarn test           # node:test 单测
 | 想接入的能力 | 建议改动位置 | 做法 |
 | --- | --- | --- |
 | 自己系统的业务数据查询 | 新建 `electron/tools/<你的系统>.js` + `electron/tool-schemas.js` + `electron/tools/index.js` | 照 `download_url` 的写法加一个工具；提示词段加在 `electron/settings.js` 的 `buildSystemPrompt` |
-| 自己的代码/文档知识库 | 新建 `electron/<你的>kb.js`，在 `electron/main.js` 里 `registerIpc()` | 参考被移除的 `kbase.js` 结构（IPC 三件套：download / getStatus / delete） |
+| 自己的代码/文档知识库 | 新建 `electron/<你的>kb.js`，在 `electron/main.js` 里 `registerIpc()` | 参考被移除的 `erp-kb.js` 结构（IPC 三件套：download / getStatus / delete） |
 | 业务代码目录（产品/测试角色读代码） | `electron/settings.js` 的 `resolvePlaceholders` | 把 `{{CODE_REPO_DIR}}` 替换为你希望 AI 读的代码根目录（默认解析为「授权目录里的第一个 git 仓库」） |
 | 登录 / 账号体系 | 新建 `electron/auth.js`，在 `main.js` 装配，前端加遮罩组件 | 需要自己设计；系统提示词里的用户上下文段在 `settings.js` 的 `buildSystemPrompt` |
 | 自动更新 | `electron-builder.yml` 的 `publish` | 开源版默认**不配置**发布源；填上你自己的 generic 服务器或 GitHub Releases 地址 |
@@ -128,6 +128,38 @@ oss/                 本开源版的说明与校验脚本（不属于上游共�
 ```bash
 node oss/check.mjs      # 扫描本仓库是否残留企业标识 / 未知占位符
 ```
+
+## 与企业版「并存安装」（应用身份）
+
+本开源版与上游企业版是**两个独立应用**，可以同时装在同一台机器上、互不干扰。靠的是这组标识互不相同：
+
+| 标识 | 上游企业版 | 本开源版 | 作用 |
+| --- | --- | --- | --- |
+| `appId`（= Windows AUMID） | `com.localai.desktop` | `com.localai.open` | 任务栏图标分组、系统通知归属、卸载项 |
+| `productName` | `Local AI` | `Local AI Open` | 开始菜单 / 桌面快捷方式、安装目录 |
+| 安装包文件名 | `local-ai-<v>-Setup.exe` | `local-ai-open-<v>-Setup.exe` | 下载与安装互不冲突 |
+| `userData` 目录 | `%APPDATA%\Local AI` | `%APPDATA%\Local AI Open` | 配置 / 会话 / 归档 —— **不共用** |
+
+> ⚠️ **二次开发务必改掉这组标识**，否则会与上游（或你自己的其它版本）共用配置目录、合并任务栏图标、通知串台。
+> 要改的只有两处：`electron/main.js` 的 `app.setName` / `app.setPath('userData')` / `setAppUserModelId`，
+> 与 `electron-builder.yml` 的 `appId` / `productName`。`node oss/check.mjs` 会检查这组标识是否仍被正确隔离。
+>
+> 三者关系：`app.setName` 只决定「默认」userData 目录名，所以**必须同时显式 `setPath('userData')`**，
+> 否则仍会落到企业版目录；`setAppUserModelId` 必须与 `appId` 一致，否则打包版可能**完全不弹系统通知**。
+
+### 代码签名与「能否并存」无关
+
+代码签名只影响 Windows SmartScreen 的警告，**不决定能否同时安装** —— 两个应用可以共用同一张证书，
+也可以各用不同证书。本开源版**默认不签名**（保持仓库不含任何凭据）。要签名，推荐用环境变量而非提交证书：
+
+```bash
+# Windows（cmd）
+set CSC_LINK=path\to\your.pfx
+set CSC_KEY_PASSWORD=your-password
+yarn build
+```
+
+也可在 `electron-builder.yml` 的 `win.signtoolOptions` 里显式配置（注意本文件不能出现两个 `win:` 键，要填就并进已有的 `win:` 段）。
 
 ## 许可证
 

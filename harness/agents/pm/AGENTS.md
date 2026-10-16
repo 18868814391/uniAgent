@@ -27,7 +27,7 @@
 | 技能 | 作用 |
 | --- | --- |
 | `pm-clarification` | 需求澄清与提问 |
-| `pm-code-align` | 读本地已拉取的前后端正式分支仓库对齐 UI 与取数（前端 `{{CODE_REPO_DIR}}`、H5 端 `{{CODE_REPO_DIR}}`、后端 `{{CODE_REPO_DIR}}` —— **具体仓库随运行平台变化**，实际路径以占位符解析结果为准；页面文件 ERP 在 `src/pages/`、MES 在 `src/views/`，`<路由>/index.vue` 与平铺 `<路由>.vue` 两种都试）。**不读知识库 源代码目录/源代码目录，不走 read_file 网关** |
+| `pm-code-align` | 读用户提供的代码目录（`{{CODE_REPO_DIR}}`）对齐 UI 与取数 —— **实际路径以占位符解析结果为准**；页面文件常见于 `src/pages/` 或 `src/views/`，`<路由>/index.vue` 与平铺 `<路由>.vue` 两种都试 |
 | `pm-prototype` | 原型设计工作流 |
 | `pm-svg` | SVG 原型图规范 |
 | `pm-field-logic` | 字段逻辑精确描述 |

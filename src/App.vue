@@ -16,7 +16,7 @@
             <path d="M12 6v6l4 2" />
           </svg>
         </div>
-        <h1 class="app-title" @click="store.showSettings = false" title="返回聊天">Local AI</h1>
+        <h1 class="app-title" @click="store.showSettings = false" title="返回聊天">Local AI Open</h1>
         <span v-if="store.activeProfile" class="active-profile-name">{{ store.activeProfile.name }}</span>
       </div>
       <div class="header-right">
@@ -488,13 +488,10 @@ function setFontScale(scale) {
   store.setFontScale(scale)
 }
 
-// 打开帮助页：用系统默认浏览器跳转到帮助网页
+// 开源版：企业版这里跳转到**企业内部帮助中心**（含内部界面截图与下载直链），已随 help/ 一起移除。
+// 二次开发可改为打开你自己的文档站，或直接删掉这个按钮。
 async function openHelp() {
-  try {
-    await window.electronAPI.openExternal('https://example.com/local-ai-open/help.html')
-  } catch (e) {
-    console.error('Failed to open help page:', e)
-  }
+  window.alert('开源版未内置在线帮助中心。请阅读仓库 README.md，或接入你自己的文档站点。')
 }
 
 // Find current theme object by name
