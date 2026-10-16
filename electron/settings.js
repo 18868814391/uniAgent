@@ -4,13 +4,13 @@
 //  model profile 归一化、系统提示词构建、以及 settings/profiles/
 //  system 域的 IPC 注册。共享可变状态一律走 state。
 // ============================================================
-const { app, ipcMain } = require('electron')
+const { app, ipcMain, shell } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const os = require('os')
 const crypto = require('crypto')
 const state = require('./state')
-const { execFilePromise, runElevated, downloadAndInstall, resolvePython } = require('./helpers')
+const { execFilePromise, runElevated, resolvePython } = require('./helpers')
 
 // ============================================================
 //  Constants
@@ -932,42 +932,19 @@ function registerIpc() {
     return { nodeVersion, pythonVersion, gitVersion, excelEnv }
   })
 
-  ipcMain.handle('system:downloadNode', async (event) => {
-    const version = '20.20.2'
-    const url = 'https://example.com/downloads/2026/7/31/0924106a6bf93ac2ec4.msi'
-    const dest = path.join(os.tmpdir(), `node-v${version}-x64.msi`)
-    await downloadAndInstall(event, url, dest, 'node', `正在下载 Node.js ${version}...`)
-    // Run installer with elevation (UAC prompt)
-    event.sender.send('system:downloadProgress', { type: 'node', percent: 100, message: '正在安装 Node.js（请在弹出的 UAC 对话框中点击"是"）...' })
-    await runElevated('msiexec.exe', ['/i', dest, '/quiet', '/norestart'])
-    try { fs.unlinkSync(dest) } catch {}
-    event.sender.send('system:downloadProgress', { type: 'node', percent: 100, message: 'Node.js 安装完成！' })
+  // 开源版：不内置安装包直链，改为打开 Node.js 官方下载页
+  ipcMain.handle('system:downloadNode', async () => {
+    await shell.openExternal('https://nodejs.org/zh-cn/download')
   })
 
-  ipcMain.handle('system:downloadPython', async (event) => {
-    const version = '3.14.5'
-    const url = 'https://example.com/downloads/2026/7/31/0931326a6bfaf490017.msi'
-    const dest = path.join(os.tmpdir(), `python-${version}-amd64.msi`)
-    await downloadAndInstall(event, url, dest, 'python', `正在下载 Python ${version}...`)
-    // Run installer with elevation (UAC prompt)
-    event.sender.send('system:downloadProgress', { type: 'python', percent: 100, message: '正在安装 Python（请在弹出的 UAC 对话框中点击"是"）...' })
-    await runElevated('msiexec.exe', ['/i', dest, '/quiet', '/norestart', 'InstallAllUsers=1', 'PrependPath=1'])
-    try { fs.unlinkSync(dest) } catch {}
-    event.sender.send('system:downloadProgress', { type: 'python', percent: 100, message: 'Python 安装完成！' })
+  // 开源版：不内置安装包直链，改为打开 Python 官方下载页
+  ipcMain.handle('system:downloadPython', async () => {
+    await shell.openExternal('https://www.python.org/downloads/windows/')
   })
 
-  ipcMain.handle('system:downloadGit', async (event) => {
-    const version = '2.35.1.2'
-    const url = 'https://example.com/downloads/2026/8/1/2214046a6dff2cb326c.exe'
-    const dest = path.join(os.tmpdir(), `Git-${version}-64-bit.exe`)
-    await downloadAndInstall(event, url, dest, 'git', `正在下载 Git ${version}...`)
-    // Git for Windows 使用 Inno Setup，静默安装参数：/VERYSILENT /NORESTART
-    event.sender.send('system:downloadProgress', { type: 'git', percent: 100, message: '正在安装 Git（请在弹出的 UAC 对话框中点击"是"）...' })
-    await runElevated(dest, ['/VERYSILENT', '/NORESTART', '/SP-'])
-    // 清掉 git 探测缓存，让后续知识库更新能识别到新装的 Git
-    gitProbeReset()
-    try { fs.unlinkSync(dest) } catch {}
-    event.sender.send('system:downloadProgress', { type: 'git', percent: 100, message: 'Git 安装完成！请重启应用使其生效。' })
+  // 开源版：不内置安装包直链，改为打开 Git for Windows 官方下载页
+  ipcMain.handle('system:downloadGit', async () => {
+    await shell.openExternal('https://git-scm.com/download/win')
   })
 
   // Excel 环境补全：安装 Python pip 依赖（openpyxl/pandas/markitdown/pycel）

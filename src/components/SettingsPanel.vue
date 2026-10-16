@@ -72,7 +72,7 @@
                 <span class="dl-spinner" />
                 {{ dlState.node.progress }}%
               </span>
-              <span v-else>下载 Node.js 20.20.2</span>
+              <span v-else>打开 Node.js 下载页</span>
             </button>
           </div>
         </div>
@@ -90,7 +90,7 @@
                 <span class="dl-spinner" />
                 {{ dlState.python.progress }}%
               </span>
-              <span v-else>下载 Python 3.14.5</span>
+              <span v-else>打开 Python 下载页</span>
             </button>
           </div>
         </div>
@@ -108,7 +108,7 @@
                 <span class="dl-spinner" />
                 {{ dlState.git.progress }}%
               </span>
-              <span v-else>下载 Git 2.35.1.2</span>
+              <span v-else>打开 Git 下载页</span>
             </button>
           </div>
         </div>
@@ -493,10 +493,13 @@ async function startDownload(type) {
   })
 
   try {
-    if (type === 'node') {
-      await window.electronAPI.downloadNode()
-    } else if (type === 'git') {
-      await window.electronAPI.downloadGit()
+    if (type === 'node' || type === 'git' || type === 'python') {
+      // 开源版：主进程只负责打开官方下载页，不做内置下载/静默安装
+      if (type === 'node') await window.electronAPI.downloadNode()
+      else if (type === 'git') await window.electronAPI.downloadGit()
+      else await window.electronAPI.downloadPython()
+      dlMessage.value = { text: '已打开官方下载页，请手动下载安装后重启应用生效。', type: '' }
+      return
     } else if (type === 'xlsx') {
       await window.electronAPI.downloadXlsxEnv()
       // 真实结果（成功/部分缺失）由 handler 通过 downloadProgress 推送，不在此覆盖
