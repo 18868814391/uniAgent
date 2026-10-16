@@ -1,0 +1,973 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "read_file",
+      "description": "Read a file's ENTIRE content (the whole file by default). Read it ONCE and completely — do NOT split a file into small chunks. Only pass offset/limit when the file is genuinely huge and you need one specific region. Genuinely huge files (over ~8000 lines / 128 KB) are auto-truncated: the result then has truncated:true plus totalLines/nextOffset — continue from nextOffset instead of shrinking limit and guessing. Re-reading the same file with the same arguments returns no new information — it only wastes a turn.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute path to the file"
+          },
+          "offset": {
+            "type": "number",
+            "description": "Start line number (1-based). Omit to read from the beginning — this is almost always what you want."
+          },
+          "limit": {
+            "type": "number",
+            "description": "Max number of lines. Omit to read the whole file — this is almost always what you want."
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_image",
+      "description": "Feed a LOCAL image FILE to yourself as a real image (vision) — you then actually SEE its content. Use it whenever the picture lives on disk: the user gives you an image path, an image was downloaded / extracted from a .docx / saved from a wiki page, or you just exported or captured a picture. NEVER use read_file on a picture (it refuses and tells you the same thing). Supports .png/.jpg/.jpeg/.webp, max 10MB each, at most 4 per call; large images are auto-downsampled. The images are attached to your NEXT message, so after calling it you can describe what is in them. Only available when the active model profile is marked vision-capable — if it is not, the tool tells you exactly what to ask the user to turn on.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute path of a single image file. Use this for the common case (one image)."
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Absolute paths of up to 4 images, when you need several at once (kept in this order)."
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "write_file",
+      "description": "Write content to a file in an allowed directory. Creates parent directories if needed. The result includes a unified diff of what changed — read it to confirm the file now contains what you intended, instead of re-reading the whole file. When the result has diffTruncated:true the diff is only partial, so read the file if you need the full picture.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute path to the file"
+          },
+          "content": {
+            "type": "string",
+            "description": "Content to write"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_directory",
+      "description": "List files and subdirectories in a directory",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute path to the directory"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "delete_file",
+      "description": "Delete a file in an allowed directory",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute path to the file"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "edit_file",
+      "description": "Surgically edit a file by replacing an exact string match (str_replace). Use this instead of write_file when modifying existing files — it preserves the rest of the file and uses fewer tokens. The old_string must be an exact match of the text to replace (including whitespace and indentation). If old_string appears more than once, set replace_all=true or provide more context to make it unique. The result includes a unified diff of the applied change — read it to confirm the edit landed as intended, instead of re-reading the whole file. When the result has diffTruncated:true the diff is only partial, so read the file if you need the full picture.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute path to the file"
+          },
+          "old_string": {
+            "type": "string",
+            "description": "The exact text to find and replace (must match exactly, including indentation)"
+          },
+          "new_string": {
+            "type": "string",
+            "description": "The replacement text"
+          },
+          "replace_all": {
+            "type": "boolean",
+            "description": "Replace all occurrences (default false, requires unique match)"
+          }
+        },
+        "required": [
+          "path",
+          "old_string",
+          "new_string"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "grep_code",
+      "description": "Search file CONTENTS (regex or plain keyword) and return matching lines as \"file:line:snippet\". Use for locating where a function, field, URL or pattern appears across a codebase. IMPORTANT — always pass `path` (a specific repo/module directory such as \"<repo>/your-backend-module\" or \"<repo>/src/pages/<route>\") and pass `include` (e.g. \"*.java\", \"*.xml\", \"*.vue\"): searching a whole workspace (several repos, tens of thousands of files) is an order of magnitude slower and comes back truncated. Each call has a hard time budget; if the result says incomplete/truncated, do NOT repeat the same broad search — narrow `path`/`include` or use glob_files to locate the file by name first.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Regex pattern or plain keyword to search for"
+          },
+          "path": {
+            "type": "string",
+            "description": "Directory to search in. ALWAYS set this to the specific repo/module directory. If omitted it defaults to the whole first allowed directory (very slow, easily truncated)."
+          },
+          "include": {
+            "type": "string",
+            "description": "File name filter glob, e.g. \"*.java\", \"*.xml\", \"*.vue\". Strongly recommended — without it every text file in the tree gets read."
+          },
+          "max_results": {
+            "type": "number",
+            "description": "Max results to return (default 30)"
+          }
+        },
+        "required": [
+          "pattern"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "glob_files",
+      "description": "Find files by glob pattern (supports **, *, ?). Pass `path` when the pattern does not already contain the directory part (e.g. path=\"<repo>/your-backend-module\", pattern=\"**/*Collect*.java\"). Cheapest way to locate a file: prefer this over grep_code when you are guessing a file name.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Glob pattern, e.g. \"src/**/*.vue\" or \"*.ts\""
+          },
+          "path": {
+            "type": "string",
+            "description": "Root directory to search from (defaults to first allowed directory; set it to keep the scan small)"
+          },
+          "max_results": {
+            "type": "number",
+            "description": "Max files to return (default 50)"
+          }
+        },
+        "required": [
+          "pattern"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "update_todos",
+      "description": "创建 / 更新当前会话的任务清单（结构化 todo list）。**开工前用它把计划写下来**：当一个任务需要 3 步以上（读多个文件、改多个位置、改完要自检）时，先把步骤列成清单再动手，然后按清单推进 —— 这份清单会在**每一轮请求末尾回显给你**，所以它是\"我做到哪了\"的唯一事实来源，不要靠记忆推进。规则：① 整表覆盖 —— 每次传完整清单，不是增量；② status 只有 pending / in_progress / completed，**同时只允许一项 in_progress**；③ 只有真正做完（含验证）才标 completed，不要凭\"打算做\"就标；④ 清单变了就调一次，没变不要重复调用；⑤ **不要在做完后清空清单** —— 全部完成后直接给出最终回答，清单保留下去（用户会对着它核对你的结果）；只有用户明确要求清空、或整个计划作废时才传空数组 []。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "todos": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "description": "任务项文本，一句话说清要做什么（含关键文件路径更佳）"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "in_progress",
+                    "completed"
+                  ],
+                  "description": "该项状态；同时最多一项为 in_progress"
+                }
+              },
+              "required": [
+                "text",
+                "status"
+              ]
+            },
+            "description": "完整清单（整表覆盖）。传空数组表示清空清单。"
+          }
+        },
+        "required": [
+          "todos"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_skills",
+      "description": "List all skill files in the skills directory",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_skill",
+      "description": "Read a skill file by name",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Skill name (with or without .md extension)"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "write_skill",
+      "description": "Write a skill file. Stored in the skills directory.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Skill name (will use .md extension)"
+          },
+          "content": {
+            "type": "string",
+            "description": "Content of the skill"
+          }
+        },
+        "required": [
+          "name",
+          "content"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_memories",
+      "description": "List all memory files in the memory directory",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_memory",
+      "description": "Read a memory file by name",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Memory name (with or without .md extension)"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "write_memory",
+      "description": "Write a memory file. Stored in the memory directory.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Memory name (will use .md extension)"
+          },
+          "content": {
+            "type": "string",
+            "description": "Content of the memory"
+          }
+        },
+        "required": [
+          "name",
+          "content"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "search_web",
+      "description": "Search the internet for real-time information, news, weather, or current events. Use this when the user asks about recent events, weather, stock prices, or anything that requires up-to-date information.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "The search query string"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "search_history",
+      "description": "搜索用户的历史会话记录（会话标题 + 消息内容，大小写不敏感）。当用户问起\"之前/上次/以前说过、做过、写过、生成过什么\"，或需要回忆历史对话内容时使用。每个命中会话返回标题、匹配片段、命中次数和截断后的对话全文，可直接基于内容回答用户。可用 limit 控制返回条数。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "要搜索的关键词，如\"正则表达式\"、\"待办清单\"、\"日报\""
+          },
+          "limit": {
+            "type": "number",
+            "description": "最多返回的会话条数（默认 3，最大 10）"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "execute_command",
+      "description": "Execute a shell command on the user's computer (via bash). Use this to run scripts, install packages, start servers, or perform any command-line task. The command runs in the user's home directory with a 300-second (5-minute) timeout. Long output is auto-truncated to head+tail (8 KB each) and the FULL output is saved to a local log file: when the result has stdoutTruncated:true, grep that stdoutPath file for the interesting lines (error / failed / FAIL) instead of re-running the command — never conclude 'build/test passed' from a truncated tail. Do NOT run whole-project type checks (vue-tsc --noEmit / tsc --noEmit) or full production builds as a verification step: they take minutes on large projects and the user runs them at packaging time. For self-check, use eslint + syntax/compile checks on the changed files only.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "The shell command to execute"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "browser_open",
+      "description": "Open the test browser and navigate to a URL. Use this for web page testing / web automation (测试网页、网页自动化、打开网站). Returns the page state { url, title, text, links }. Reuses the existing test window if already open.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The URL to open. Scheme optional (e.g. example.com → https://example.com)."
+          },
+          "timeoutMs": {
+            "type": "number",
+            "description": "Load timeout in milliseconds (default 10000)."
+          }
+        },
+        "required": [
+          "url"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "browser_click",
+      "description": "Click an element in the test page. Target is preferably the `ref` from browser_snapshot; a CSS selector (e.g. \"button.primary\", \"#login\") or exact text (\"text=登录\") also works. When the same text appears many times, use the explicit `ref`, or disambiguate with \">> nth=N\" (0-based, e.g. \"text=编辑 >> nth=57\") — a bare \"text=编辑\" always hits the FIRST match. Scrolls the element into view and sends a real mouse click.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "selector": {
+            "type": "string",
+            "description": "`ref` from browser_snapshot (e.g. \"ref=23\"), a CSS selector, \"text=ExactText\", or \"text=ExactText >> nth=N\"."
+          },
+          "timeoutMs": {
+            "type": "number",
+            "description": "How long to wait for the element to appear (default 5000)."
+          }
+        },
+        "required": [
+          "selector"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "browser_type",
+      "description": "Focus an input/textarea/contenteditable and type text (appends like real typing). Target uses the same forms as browser_click: a `ref` from browser_snapshot (preferred), a CSS selector, or \"text=...\".",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "selector": {
+            "type": "string",
+            "description": "`ref` from browser_snapshot, a CSS selector, \"text=ExactText\", or \"text=ExactText >> nth=N\"."
+          },
+          "text": {
+            "type": "string",
+            "description": "The text to type."
+          }
+        },
+        "required": [
+          "selector",
+          "text"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "browser_press",
+      "description": "Press a key or chord in the test page: \"Enter\", \"Escape\", \"Tab\", \"Control+S\", \"Shift+Tab\", \"ArrowDown\", \"F5\", etc.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Key or modifier chord, e.g. \"Enter\" or \"Control+Shift+P\"."
+          }
+        },
+        "required": [
+          "key"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "browser_eval",
+      "description": "Evaluate JavaScript in the test page context (sandboxed). `arg` is available as a local variable. Use for complex DOM reads, custom waits, or one-off actions. Use `return` to yield a value.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "js": {
+            "type": "string",
+            "description": "JS function body, e.g. \"return document.querySelectorAll('.item').length\" or \"return [...document.querySelectorAll('a')].map(a => a.href)\"."
+          },
+          "arg": {
+            "type": "object",
+            "description": "Optional payload available as the local variable `arg`."
+          }
+        },
+        "required": [
+          "js"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "browser_get_page",
+      "description": "Read the current test page state: URL, title, visible text (truncated) and top links. Call this to read page body text / data / results.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "maxLen": {
+            "type": "number",
+            "description": "Max text length to return (default 6000, max 20000)."
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "browser_snapshot",
+      "description": "Return a compact list of interactive elements on the test page (buttons / inputs / links / selects / checkboxes), each with a stable `ref`, `role` and `name` — no CSS selector noise, so it is far cheaper than browser_get_page. It also reports `total` (how many matching elements exist in all) and `duplicates` (names that appear more than once, e.g. {\"编辑\":400}), so a truncated list is never a silent surprise. Pass an item's `ref` to browser_click / browser_type. When a name is repeated, always use the explicit `ref` (a bare \"text=编辑\" resolves to the FIRST match) or disambiguate with \"text=编辑 >> nth=57\". Call it again after a large DOM change.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "max": {
+            "type": "number",
+            "description": "Max elements to return (default 200, max 400)."
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "browser_wait_for",
+      "description": "Wait until an element is visible (pass selector) or a JS condition returns truthy (pass condition, use `return`). Use before interacting with dynamically-loaded content.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "selector": {
+            "type": "string",
+            "description": "`ref` from browser_snapshot, a CSS selector, or \"text=...\" to wait for."
+          },
+          "condition": {
+            "type": "string",
+            "description": "JS expression/body returning truthy when ready, e.g. \"return window.__app && document.querySelector('.list')\"."
+          },
+          "timeoutMs": {
+            "type": "number",
+            "description": "Timeout in milliseconds (default 10000)."
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "browser_screenshot",
+      "description": "Capture the currently VISIBLE VIEWPORT of the test page as a PNG (not the whole scrollable page). The file is saved for the user to look at / keep as evidence, and — when the active model profile is vision-capable — the picture is also handed to you as an image, so you can look at it yourself. That makes it the fallback for visual things the DOM cannot describe (canvas drawings, CSS background images, layout overlap). Returns the saved path either way. Call it at most once per request.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Screenshot file name (no extension)."
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "browser_read_images",
+      "description": "Grab the images of the currently open test page and hand them to you AS REAL IMAGES (vision) — banners, charts, screenshots-like blocks, layout, anything drawn in pictures. Use it whenever the user gives a web page URL (or asks \"这个页面长什么样 / 图里写了什么 / 帮我看看这张图\") — browser_get_page only returns text and cannot show you any picture. Returns a text index (alt / size / source URL) and attaches the images to your next message, so you can actually see them afterward. Requires browser_open first (it reads the CURRENT page). Always pick ≤3 unless you really need more. Only dispatched when the active model profile is marked vision-capable.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "max": {
+            "type": "number",
+            "description": "Max images to attach (default 3, max 4). Each image costs ≈1.4k tokens at 1280px, and is re-sent every following round."
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "browser_console_logs",
+      "description": "Read recent console messages from the test page (log/info/warning/error). Useful for debugging page errors during testing.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "number",
+            "description": "Max entries to return (default 50)."
+          },
+          "type": {
+            "type": "string",
+            "description": "Filter by level: log | info | warning | error | debug."
+          },
+          "clear": {
+            "type": "boolean",
+            "description": "Drain the buffer after reading."
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "browser_close",
+      "description": "Close the test browser window. It will be re-created automatically on the next browser_open.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "browser_wait_download",
+      "description": "Wait for a file download triggered by the test browser window to finish (e.g. after clicking a website「下载」button). Downloads are auto-saved to the app download dir (userData/browser-downloads) without a system dialog; this tool returns the saved local file path + filename + state so you can read_file / execute_command it afterwards. Pass name (filename keyword) when multiple downloads may exist; call it right after the click and poll internally until done or timeout.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Filename keyword to match (optional; latest download used when omitted)."
+          },
+          "timeoutMs": {
+            "type": "number",
+            "description": "Max wait in ms (default 60000)."
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "browser_flow",
+      "description": "Run a whole sequence of browser steps in ONE call — click / type / press / wait / goto / sleep / assert* — stopping at the first failure and returning a per-step pass/fail summary plus the page snapshot AT the point of failure. This is the fastest way to execute a known test flow: 20 steps cost 1 roundtrip instead of 40+. Step shape: { action, target?, value?, note? }. Actions: \"click\" (needs target), \"type\" (target + value), \"press\" (value = key, e.g. \"Enter\"), \"wait\" (target = selector, or value = ms), \"goto\" (value = url), \"sleep\" (value = ms), \"assertText\" (target + value = substring), \"assertValue\" (target + value = exact match), \"assertVisible\" (target), \"assertUrl\" (value = substring of current URL), \"assertEval\" (value = JS expression returning truthy). `target` accepts a `ref` from browser_snapshot (preferred), a CSS selector, or \"text=...\" (use \"text=... >> nth=N\" for repeated names). Pass `saveAs` to persist the flow as YAML — refs are automatically converted to stable selectors — and later replay it with zero LLM via `flow: \"<name>\"`.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "description": "click / type / press / wait / goto / sleep / assertText / assertValue / assertVisible / assertUrl / assertEval"
+                },
+                "target": {
+                  "type": "string",
+                  "description": "Element target: `ref` from browser_snapshot, a CSS selector, or \"text=ExactText\" (\"text=ExactText >> nth=N\" for repeated names)."
+                },
+                "value": {
+                  "type": "object",
+                  "description": "Text to type / key to press / ms to wait / expected value for asserts."
+                },
+                "note": {
+                  "type": "string",
+                  "description": "Free-form note, preserved in the saved YAML."
+                },
+                "timeoutMs": {
+                  "type": "number",
+                  "description": "Per-step timeout override."
+                }
+              },
+              "required": [
+                "action"
+              ]
+            },
+            "description": "Steps to execute. Omit this when replaying a saved flow via `flow`."
+          },
+          "flow": {
+            "type": "string",
+            "description": "Name of a previously saved flow (YAML) to replay with zero LLM. Alternative to `steps`."
+          },
+          "saveAs": {
+            "type": "string",
+            "description": "Persist this flow under this name so it can be replayed later without the model."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-readable flow name, written into the saved YAML."
+          },
+          "stopOnFail": {
+            "type": "boolean",
+            "description": "Stop at the first failing step (default true)."
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_file",
+      "description": "Call 华铁 ERP 业务接口（自动携带已保存的登录 token）——【只读查询】。url 为 host 之后含 his- 前缀的路径，如 \"his-finance/abstractReceiveMoneyChange/page\"。仅支持查询类 GET/POST（列表 page、详情 detail/getInfo、导出 export 等读取接口）；一切新增/修改/删除/审核/审批/状态变更/导入等写操作已被系统底层拦截，不会执行（返回 erpError=HIGH_RISK_OPERATION）。GET 时 body 作为 query 参数，POST 时作为 JSON 请求体。成功返回 { success, code, data }；失败返回 { success:false, erpError }，其中 erpError=TOKEN_EXPIRED / NOT_LOGGED_IN 时需提示用户重新登录。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "method": {
+            "type": "string",
+            "enum": [
+              "GET",
+              "POST"
+            ],
+            "description": "HTTP method — 仅查询用 GET/POST（写操作会被系统拦截）"
+          },
+          "url": {
+            "type": "string",
+            "description": "API path after the host, e.g. \"his-finance/abstractReceiveMoneyChange/page\""
+          },
+          "body": {
+            "type": "object",
+            "description": "GET: query params (key→value); POST: JSON request body."
+          }
+        },
+        "required": [
+          "method",
+          "url"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "grep_code",
+      "description": "检索业务代码，用于定位页面/接口/后端逻辑。scope=map 在本地 页面清单.md 页面清单检索；scope=frontend 在本地 源代码目录 前端源码检索；scope=api 走线上前端接口索引（页面/组件 → 接口 url，返回带 url 字段，可直接喂给 read_file）；scope=backend（或 all）的后端部分采用【本地 源代码目录 全库扫描 + 线上网关】双路：source=local-源代码目录 命中来自本地全库扫描（扫完整个库后按\"文件名命中 > 声明行 > SQL > 正文 > 注释\"排序取前 N，file 相对知识库根含 源代码目录/ 前缀、line 为本地行号）；source=gateway-backend 命中来自线上方法切片索引（file 相对服务器、start/end 为服务器权威行号）。返回最多 40 条，并附 localScan 覆盖率字段（filesScanned / complete / matchedHits / returned / capped / elapsedMs）——complete=false 或 capped=true 表示结果不完整，不要把 matchCount 当成全库结论。线上检索会先试整串匹配，无果再按拆词 AND（\"入库 审核\"）、中文复合词 2 字词组打分回退（\"入库审核\"）——回退命中会带 gatewaySearch.strategy 与命中项的 fuzzy/matchBigrams 字段，含义是\"该行只含这些片段、不保证连续出现整串\"，只能当候选线索，不要当精确命中下结论。需要读完整方法体/SQL 时用 read_file(file, start, end)，start/end 取 source=gateway-backend 命中项的行号（本地行号 ≠ 服务器行号，勿混用）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Case-insensitive substring, e.g. a page name, route path, API url or controller keyword."
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "map",
+              "frontend",
+              "api",
+              "backend",
+              "all"
+            ],
+            "description": "Where to search (default all)."
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_file",
+      "description": "从【线上后端代码网关】拉取后端 Java/XML 代码片段（服务器精读脱敏副本：方法体与 SQL、中文注释完整保留，仅服务器地址、OSS/地图 key、密钥类键值被置为占位符 <REDACTED> 等）。本地 源代码目录 已删除 Controller/Service 方法体（标记 // [方法体已脱敏移除]），需要看完整方法体/校验逻辑/SQL 时一律用本工具。file 用 grep_code(scope=backend) 中 source=gateway-backend 命中项的 file（或 source=local-源代码目录 命中项 file 去掉 源代码目录/ 前缀后同构）；start/end 只取 source=gateway-backend 命中项的服务器行号（本地行号已因去方法体而偏移，不可直接使用）。不传 start/end 则返回整文件（超长自动截断前 600 行）。网关会做【索引漂移校验】：核对\"请求行号\"与\"索引里该行所属的方法\"是否一致，不一致直接返回 erpError=STALE_INDEX 并拒绝返回代码——这时重试无用，不要据此推断业务逻辑、也不要换行号硬凑，改为重新 grep_code 或提示用户重建索引。返回里的 expectCheck=ok 表示已核对一致，unverified 表示无法判定（不是\"通过\"）。可传 expect=<期望出现的方法名或片段> 做显式校验。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "后端文件相对路径（服务器网关视角），例如 his-product/product-service/src/main/java/cn/example/his/product/controller/GoodsController.java"
+          },
+          "start": {
+            "type": "number",
+            "description": "起始行号（1-based，含，服务器文件行号），与 end 配合定位方法体/片段"
+          },
+          "end": {
+            "type": "number",
+            "description": "结束行号（含）；缺省读到方法尾/文件尾"
+          },
+          "expect": {
+            "type": "string",
+            "description": "期望该区间内出现的方法名/片段，用于显式校验行号是否失效（不传时网关用索引自动校验）"
+          }
+        },
+        "required": [
+          "file"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "browser_open",
+      "description": "在应用内置浏览器窗口中打开当前环境（正式/测试）的华铁 ERP 页面，并用当前登录信息拼接 ?userUrl= 参数实现免登。打开后返回页面状态，AI 可直接用 browser_* 工具（browser_get_page / browser_click / browser_type / browser_press / browser_eval / browser_wait_for 等）在页面上继续操作。仅当用户要求\"打开 ERP / 打开系统 / 免登进入 ERP / 在 ERP 页面里操作\"时调用。注意：若本次打开是因为用户缺少目标页面的权限，则打开 ERP 主页面后直接交由用户操作，不要用 browser_* 工具去寻找目标页面。",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "确认用户权限",
+      "description": "校验当前登录用户是否拥有指定的 ERP 资源/权限码（权限码，来自 页面清单.md，如 \"WZ_YC_ADD\"、\"SOURCE_MANAGE\"）。传入一个或多个权限码，返回每个码是否在当前用户的可访问范围内。通过 页面清单.md 定位到某个页面/操作、准备查询或操作其数据之前，应先调用本工具核对用户权限；若用户无权限则提示用户并引导打开 ERP。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "codes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "需要校验的 ERP 权限码数组，例如 [\"WZ_YC_ADD\", \"SOURCE_MANAGE\"]"
+          }
+        },
+        "required": [
+          "codes"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_directory",
+      "description": "获取当前登录用户在【当前环境】（正式 master / 测试 test / 开发 dev，自动按设置切换）的 ERP 前端页面权限：实时调用 getLatestResourceTreeByRoleId，跨登录角色合并去重，渲染成带环境标识的 Markdown 权限清单（页面名→路由，代码位置约定 源代码目录/src/pages/<路由>/index.vue 或 源代码目录/src/pages/<路由>.vue——详情页多为平铺的 <路由>.vue，两种都要试），保存到测试输出目录 permissions/<环境>-page-permission.md。测试前调用它快速定位页面与代码位置；环境切换或权限数据可能更新时重新调用（每次实时拉取、不缓存，不覆盖 ERP 知识库）。返回文件路径、环境、页面/按钮数、生成时间。",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "ask_user",
+      "description": "在回答之前向用户提一个关键问题或一组选择题，应用会在聊天区弹出选择卡片，等待用户选择/输入后把回答作为工具结果返回给你。用于：① 用户需求的目标、范围、关键信息不清楚时；② 需要在多个方案/方向间让用户拍板时；③ 预判继续深入阅读代码或资料会比较慢，先让用户缩小范围或确认关键点时。注意：问题要短、有推进价值；能推断的先给出你的判断让用户确认，不要把所有问题都推回给用户；不要连续反问超过 3 次，用户回答后基于已有信息推进，未确认项标记为\"待确认\"。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string",
+            "description": "要问用户的问题，简短明确"
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "给用户的选择项（最多 6 个）。不传则只有开放式输入框。注意：无论传不传，弹窗下方**始终**有自定义输入栏、用户可忽略选项自己写 —— 不需要为了\"留个自由发挥的余地\"而额外加一个\"其他\"选项。"
+          }
+        },
+        "required": [
+          "question"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "legal_npc_search",
+      "description": "在国家法律法规数据库（https://flk.npc.gov.cn/，全国人大官网）检索公开法律法规，返回命中列表（标题/公布与施行日期/制定机关/法规位阶/时效性编码 sxx/法规ID bbbs）。实现为官网纯 HTTP 检索接口（无需打开浏览器、无验证码），适用于用户要求某法规/条例全文或具体内容、而本地法律法规库中缺失时；官网收录宪法、法律、行政法规、监察法规及省/设区市地方性法规。拿到 bbbs 后配合 download_url 下载文字版 docx：url=https://flk.npc.gov.cn/law-search/download/pc?format=docx&bbbs=<法规ID>。仅当接口被网络/WAF 拦截时工具内部才自动回退浏览器站内搜索。禁止不经检索就凭模型知识直接作答或只列推荐网站；同名多版本命中时优先 sxx 对应「现行有效」且公布日期最新者；地方性法规未命中可再用 search_web 找当地人大/政府公报官方原文。内部合同、公司制度等涉密材料一律禁止调用。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "检索内容：法规/条例全称（优先）、关键词、发文字号 等，如 \"杭州市民用建筑节能条例\" 或 \"建筑节能条例\""
+          },
+          "page": {
+            "type": "number",
+            "description": "结果页码（默认 1）"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "download_url",
+      "description": "从官方直链下载文件到本地（浏览器下载目录 userData/browser-downloads，AI 可读可解析）。两类用途：① 国家法律法规数据库下载接口：https://flk.npc.gov.cn/law-search/download/pc?format=docx&bbbs=<法规ID>（format 用 docx 文字版优先；bbbs 由 legal_npc_search 返回的「法规 ID」字段或 flk 详情 URL 的 id= 提供）——工具会自动解析该接口返回的 JSON 并下载其签名直链，无需浏览器；② 政府公报 / 地方人大等官方附件直链（域名限 *.gov.cn / *.npc.gov.cn）。保存成功后返回本地绝对路径 file，之后用 read_file / execute_command 解析内容（docx 可解 zip 读 word/document.xml，或经 python-docx / LibreOffice 转文本）。禁止下载非官方域（防 SSRF）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "官方直链或 flk 下载接口 URL（http/https，域名 *.gov.cn / *.npc.gov.cn）"
+          },
+          "name": {
+            "type": "string",
+            "description": "保存文件名（含扩展名，如 \"民用建筑节能条例.docx\"）；不传则按直链自动推断"
+          }
+        },
+        "required": [
+          "url"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "spawn_sub_agent",
+      "description": "派发一个子代理并行执行独立子任务。子代理拥有与你相同的全部工具能力（文件/搜索/命令行/ERP等），但不能再派生子代理，也不继承你的完整角色约定（只带\"当前角色 + 代码仓库根目录 + 检索纪律\"）。最多同时运行 2 个。返回后请立即调用 get_sub_agent_results 等待结果。适合场景：需要分别调研/搜索两个独立话题、同时读取多个文件对比分析、分别执行两个独立操作。不适合：单个子任务就需要在大仓库里做宽泛检索（如\"去某仓库找某个接口的实现\"）——那种任务请自己在主循环里做，或把范围缩到具体模块目录再派发。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "task": {
+            "type": "string",
+            "description": "子任务的详细描述。必须清晰具体并包含目标与上下文，且**务必写清具体仓库/模块路径**（如 his/your-backend-module、your-frontend/src/pages/order/lossBill）——子代理不知道你的上下文，路径写不清楚它会全库乱搜直到超时"
+          },
+          "description": {
+            "type": "string",
+            "description": "简短标签，用于 UI 状态展示，如\"调研 API 方案\""
+          }
+        },
+        "required": [
+          "task"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_sub_agent_results",
+      "description": "等待所有已派发的子代理完成并返回结果。调用后会阻塞直到所有子代理结束（最长 10 分钟），期间你无法与用户交互——调用前先告知用户你在等子代理。如果没有任何活跃子代理，直接返回空结果。请在 spawn_sub_agent 之后调用此工具。子代理超时或被中止时，返回结果里会**一并带回它中止前已完成的部分成果**（可能不完整）；此时请基于这些线索自己继续推进，不要把同一个子任务原样重新派发一次。",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  }
+]

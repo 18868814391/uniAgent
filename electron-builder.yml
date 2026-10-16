@@ -1,0 +1,53 @@
+# electron-builder 打包配置
+# 运行 `yarn build` 后，产物输出到 release/ 目录
+
+appId: com.localai.desktop.oss
+productName: Local AI Open
+
+directories:
+  output: release
+
+# 压缩级别说明（针对内存紧张机器的权衡）：
+# - maximum（-mx=9）：7z 字典过大，曾因内存分配失败而弃用；且实测对体积几乎无帮助
+#   （Electron 可执行文件构建时已预压缩，7z 无法再压；store/normal/maximum 实测安装包均为 ~75MB）
+# - normal（-mx=5 量级）：字典远小、内存可控，保留对文本资源的压缩能力，推荐
+compression: normal
+
+# 仅保留中英文语言包，剔除其余 53 个语言包（占 ~40MB 未压缩体积，是安装包从 87MB 降到 75MB 的主因）
+electronLanguages: ['en-US', 'zh-CN']
+
+# 进入 app.asar 的文件（vite 已把渲染层依赖打进 dist，无需 node_modules）
+# 注意：ERP 知识库（background 里的 源代码目录/源代码目录/映射）不再打包，改为设置页按需下载到 userData/kbase
+files:
+  - dist/**
+  - dist-electron/**
+  - skills/**
+  - harness/**
+  - build/**
+  - package.json
+
+# 复用 node_modules 里已下载的 Electron，避免打包时再从 GitHub 下载
+electronDist: node_modules/electron/dist
+
+# 自动更新：默认**不配置**发布源（开源版不指向任何企业服务器）。
+# 二次开发若需自动更新，自行填 publish.url（例如你自己的 generic 服务器或 GitHub Releases）：
+#
+publish:
+  provider: generic
+  url: https://example.com/local-ai-open/
+
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: always
+  shortcutName: Local AI Open
+  # 文件名用包名（local-ai）而非 productName，避免空格导致 latest.yml 里
+  # url 与磁盘文件名不一致（electron-builder 会把空格转成连字符）
+  artifactName: ${name}-${version}-Setup.${ext}

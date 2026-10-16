@@ -1,0 +1,54 @@
+{
+  "id": "local-ai-harness",
+  "name": "Local AI 角色物料库（产品 + 测试 + Excel专家 + 法务专家 + 开发）",
+  "version": "1.5.0",
+  "description": "Local AI（开源版）的角色物料库：产品角色（小策）、测试角色（验测）、Excel专家（表哥）、法务专家（法务专家）与开发角色（小匠）的系统提示词 / 技能 / 约定。技能按角色分目录（skills=产品、skills-qa=测试、skills-excel=Excel专家、skills-legal=法务专家、skills-dev=开发）。产品与测试角色读**你自己配置的代码仓库目录**（{{CODE_REPO_DIR}}；企业版是切身份时自动拉取的内网仓库，开源版已移除，需二次开发接入）。开发角色绕过授权目录白名单（高风险），破坏性操作须经用户确认。可整体复制到其它应用使用。",
+  "roles": ["product", "qa", "excel", "legal", "dev"],
+  "agents": ["pm", "qa", "excel", "legal", "dev"],
+  "skills": {
+    "product": ["pm-clarification", "pm-code-align", "pm-prototype", "pm-svg", "pm-field-logic", "pm-prd"],
+    "qa": ["qa-intake", "qa-case-ledger", "qa-whitebox-review", "qa-blackbox", "qa-report"],
+    "excel": ["xl-read", "xl-clean", "xl-transform", "xl-formula", "xl-format", "xl-chart", "xl-batch", "xl-convert"],
+    "legal": ["legal-statute-lookup", "legal-contract-review", "legal-clause-extract", "legal-risk", "legal-template", "legal-ask"],
+    "dev": ["dev-code-change", "dev-self-check", "dev-git-discipline", "dev-learn", "dev-rmslop"]
+  },
+  "conventions": {
+    "product": ["pm/output-spec", "pm/global-product-rules", "pm/ask-user-rules"],
+    "qa": ["qa/qa-conventions", "qa/report-contract"],
+    "excel": ["excel/excel-conventions"],
+    "legal": ["legal/output-spec", "legal/confidentiality", "legal/disclaimer", "legal/ask-user-rules"],
+    "dev": ["dev/dev-conventions"]
+  },
+  "usage": {
+    "roles": {
+      "product": {
+        "systemPrompt": "roles/product/system-prompt.md",
+        "skillsDir": "skills/",
+        "outputDir": "{{PRODUCT_OUTPUT_DIR}}",
+        "repoRoot": "{{CODE_REPO_DIR}}"
+      },
+      "qa": {
+        "systemPrompt": "roles/qa/system-prompt.md",
+        "skillsDir": "skills-qa/",
+        "outputDir": "{{TEST_OUTPUT_DIR}}",
+        "repoRoot": "{{CODE_REPO_DIR}}"
+      },
+      "excel": {
+        "systemPrompt": "roles/excel/system-prompt.md",
+        "skillsDir": "skills-excel/",
+        "outputDir": "{{EXCEL_OUTPUT_DIR}}"
+      },
+      "legal": {
+        "systemPrompt": "roles/legal/system-prompt.md",
+        "skillsDir": "skills-legal/",
+        "outputDir": "{{LEGAL_OUTPUT_DIR}}"
+      },
+      "dev": {
+        "systemPrompt": "roles/dev/system-prompt.md",
+        "skillsDir": "skills-dev/",
+        "conventionsDir": "conventions/dev/"
+      }
+    },
+    "placeholderNote": "宿主应用（如 Local AI）会把 {{TOKEN}} 占位符替换为真实路径后再注入系统提示词。"
+  }
+}
