@@ -60,19 +60,6 @@ const TOOL_RESULT_FOLD_MIN = 800    // 短于该长度的结果不折叠：小�
 // 与上面的默认窗口独立计数 —— 浏览器结果再多也不会挤掉这 8 份原文。
 const FACT_TOOL_RESULT_WINDOW = 8
 const FACT_TOOLS = new Set(['read_file', 'read_skill', 'read_memory'])
-// ============================================================
-//  dev 角色工具白名单（2026-09-30）
-//
-//  40 个工具全发时 tools schema ≈ 9,835 tokens / 轮，其中 24 个（≈7,139 tokens，占 73%）
-//  是 browser_* / ERP 知识库 / 法务等**改码根本用不上**的：既白烧 prefill（每一轮都要重发），
-//  也会干扰模型的工具选择。收窄到下面这些后 ≈ 3,315 tokens，每轮固定开销 18.2K → 11.6K（-36%）。
-//  （工具分组实测：browser_* 13 个 3,095、ERP/知识库 5 个 2,124、法务 2 个 832…）
-//  2026-09-30 追加：update_todos（结构化任务清单）—— 「15 轮以内」原先只是提示词里的一段
-//  正文，模型跑几轮就看不见了；清单每轮回显后可执行。**全角色可用**（纪律在 settings.js 的
-//  【任务清单】公共段，不靠各角色 harness 提示词），可经 settings.todosEnabled = false 关闭。
-//
-//  注意：search_web 仍先受 enableWebSearch 开关约束 —— 下面的过滤链在它之后执行。
-// ============================================================
 // 视觉类工具（需要"当前模型能收图片"这一前提）。集中一处，避免下发给纯文本模型 → 400。
 // 注意 browser_screenshot 不在这里：它本身只是落盘，视觉载荷是"顺手"给的（配置关着也不报错）。
 const VISION_TOOL_NAMES = new Set(['read_image', 'browser_read_images'])
@@ -98,19 +85,6 @@ function visionErrorHint(messages, errText) {
   }
 }
 
-const DEV_TOOL_NAMES = new Set([
-  // read_image：dev 能读写本机任意文件，就该能看任意图片 —— 2026-10-05 补。
-  // 起因：用户用开发角色改 your-frontend 页面，图是从 wiki 落到磁盘的 PNG，而 dev 的工具集里
-  // 一个 browser_* 都没有、也没有任何"看图"入口，模型只能读 1245 行乱码然后转去 PowerShell OCR。
-  // ⚠️ 这个集合是 dev 的**唯一工具白名单**，改动要同步三处：
-  //    chat.js（本处）、harness/roles/dev/system-prompt.md 的工具清单、ReadMe.md 的角色总览。
-  'read_file', 'read_image', 'write_file', 'edit_file', 'list_directory', 'delete_file',
-  'grep_code', 'glob_files', 'execute_command',
-  'update_todos',
-  'list_skills', 'read_skill', 'write_skill',
-  'list_memories', 'read_memory', 'write_memory',
-  'search_web', 'ask_user', 'spawn_sub_agent', 'get_sub_agent_results',
-])
 // 上下文窗口够大时，事实原文类**完全不折叠**。
 // 起因（2026-09-29 实测聊天记录）：用户用 1M 窗口的模型（日志里是 94.8K/1.0M = 9%），
 // 却被 8 条窗口折掉大部分正文 → 模型看到 `[已折叠 · 原 X 字符]` 以为"信息丢了"，
@@ -1057,10 +1031,6 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
       if (!visionCapable) {
         availableTools = availableTools.filter(t => !VISION_TOOL_NAMES.has(t.function.name))
       }
-      // 页面权限工具仅测试角色可用
-      if (state.settings.role !== 'qa') {
-        availableTools = availableTools.filter(t => t.function.name !== 'list_directory')
-      }
       // 子 Agent 工具：默认启用，可通过 settings.subAgentsEnabled = false 关闭
       if (state.settings.subAgentsEnabled === false) {
         availableTools = availableTools.filter(t => !['spawn_sub_agent', 'get_sub_agent_results'].includes(t.function.name))
@@ -1072,12 +1042,7 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
       if (state.settings.todosEnabled === false) {
         availableTools = availableTools.filter(t => t.function.name !== 'update_todos')
       }
-      // dev 角色按白名单收窄工具集（2026-09-30，见文件顶部 DEV_TOOL_NAMES）：
-      // 改码用不上的 24 个工具（browser_*/ERP/法务…）不再随每轮请求发出去，
-      // 每轮省 ≈6,520 tokens 的固定开销，同时减少误选工具导致的探索性往返。
-      if (state.settings.role === 'dev') {
-        availableTools = availableTools.filter(t => DEV_TOOL_NAMES.has(t.function.name))
-      }
+      // 开源版：不做工具收窄 —— 默认助手拥有全部工具（含浏览器 / 联网 / 文件格式处理）。
       // 开源版说明：企业版这里还有一段「平台能力收敛」——MES 平台不下发
       // read_file / grep_code / read_file / 确认用户权限 四个企业专属工具。
       // 开源版这些工具与平台概念一并移除，无需过滤。
@@ -1361,8 +1326,7 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
         //   项目（git 仓库）内的写 / 改 / 删 → 免打扰；
         //   系统级路径、未跟踪文件的删除、高风险命令 → 弹确认框（归入串行）；
         //   毁机级命令 → 直接拒绝（连"确认执行"都不给）。
-        // 其它角色 gate 恒为 allow，行为完全不变。
-        const gate = (name !== 'ask_user' && !isSubAgentTool && state.settings.role === 'dev' && parsedArgs)
+        const gate = (name !== 'ask_user' && !isSubAgentTool && parsedArgs)
           ? guard.evaluateToolCall(name, parsedArgs)
           : { action: 'allow' }
         // 需要确认的两种情况：

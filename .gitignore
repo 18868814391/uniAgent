@@ -7,3 +7,7 @@ background/
 .DS_Store
 __pycache__/
 *.pyc
+
+# oss-sync：同步工具的 worktree 临时检出与水位（纯本机状态，不入库）
+oss-sync/.oss-src/
+oss-sync/sync.state.json

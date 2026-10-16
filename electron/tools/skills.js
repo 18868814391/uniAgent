@@ -45,28 +45,10 @@ function getSkillDirs() {
   if (fs.existsSync(BUILTIN_SKILLS_DIR)) {
     dirs.push(BUILTIN_SKILLS_DIR)
   }
-  // 产品角色技能库（skills/pm-*）
-  if (state.settings.role === 'product' && fs.existsSync(HARNESS_SKILLS_DIR)) {
-    dirs.push(HARNESS_SKILLS_DIR)
-  }
-  // 测试角色技能库（skills-qa/qa-*，仅测试角色可见）
-  if (state.settings.role === 'qa' && fs.existsSync(HARNESS_QA_SKILLS_DIR)) {
-    dirs.push(HARNESS_QA_SKILLS_DIR)
-  }
-  // Excel专家技能库（skills-excel/xl-*，Excel专家 + 通用角色可见）
-  // 通用角色放开：业务员常在通用角色下直接丢表格文件给 AI（忘记切 Excel专家），
-  // 放开后仍能 read_skill('xl-read'/'xl-clean'...) 拿到预置脚本用法与安全流程引导。
-  if (['excel', 'general'].includes(state.settings.role) && fs.existsSync(HARNESS_EXCEL_SKILLS_DIR)) {
-    dirs.push(HARNESS_EXCEL_SKILLS_DIR)
-  }
-  // 法务专家技能库（skills-legal/legal-*，仅法务专家角色可见）
-  // 法务涉及保密与免责，不向其它角色放开。
-  if (state.settings.role === 'legal' && fs.existsSync(HARNESS_LEGAL_SKILLS_DIR)) {
-    dirs.push(HARNESS_LEGAL_SKILLS_DIR)
-  }
-  // 开发角色技能库（skills-dev/dev-*，仅开发角色可见）
-  if (state.settings.role === 'dev' && fs.existsSync(HARNESS_DEV_SKILLS_DIR)) {
-    dirs.push(HARNESS_DEV_SKILLS_DIR)
+  // 开源版：无角色概念 —— 所有场景技能库对默认助手**全部可见**，
+  // 由系统提示词的「场景调度」段引导它按用户意图 read_skill 加载对应技能。
+  for (const d of [HARNESS_SKILLS_DIR, HARNESS_QA_SKILLS_DIR, HARNESS_EXCEL_SKILLS_DIR, HARNESS_LEGAL_SKILLS_DIR, HARNESS_DEV_SKILLS_DIR]) {
+    if (fs.existsSync(d)) dirs.push(d)
   }
   return dirs
 }

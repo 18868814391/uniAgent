@@ -251,31 +251,14 @@ test('一轮内多个独立工具并发执行，结果仍按 tool_calls 原顺�
   assert.equal(eventsOf('chat:done').length, 1)
 })
 
-test('dev 角色只发白名单工具，其它角色不受影响', async () => {
+test('开源版不做工具收窄：所有角色都下发全量工具', async () => {
   currentFetch = mockFetch([[stopChunk('好的')]])
 
-  // dev：收窄到白名单
   await chat.handleChatSend(makeEvent(), payload())
-  const devTools = bodies[0].tools.map((t) => t.function.name)
-  assert.ok(!devTools.includes('browser_click'), 'dev 不该收到 browser_* 工具')
-  assert.ok(devTools.includes('read_file') && devTools.includes('edit_file'), 'dev 必须保留改码工具')
-  assert.ok(devTools.includes('execute_command'), 'dev 必须保留 execute_command')
-  assert.ok(devTools.every((n) => [
-    'read_file', 'write_file', 'edit_file', 'list_directory', 'delete_file',
-    'grep_code', 'glob_files', 'execute_command',
-    'list_skills', 'read_skill', 'write_skill',
-    'list_memories', 'read_memory', 'write_memory',
-    'search_web', 'ask_user', 'spawn_sub_agent', 'get_sub_agent_results',
-  ].includes(n)), 'dev 收到的工具必须全部在白名单内')
-
-  // product：不收窄（browser/erp 照旧下发）
-  sent.length = 0
-  bodies.length = 0
-  stateStub.chatRuns = new Map()
-  stateStub.settings = { allowedDirs: [], role: 'product', autoExecute: true, subAgentsEnabled: true }
-  await chat.handleChatSend(makeEvent(), payload())
-  const pmTools = bodies[0].tools.map((t) => t.function.name)
-  assert.ok(pmTools.includes('browser_click'), '非 dev 角色的工具集不该被收窄')
+  const names = bodies[0].tools.map((t) => t.function.name)
+  assert.ok(names.includes('read_file') && names.includes('edit_file'), '改码工具必须在')
+  assert.ok(names.includes('execute_command'), '命令执行必须在')
+  assert.ok(names.includes('browser_click'), '浏览器工具也必须下发（不再按角色收窄）')
 })
 
 test('串行组独占执行：browser_* 互不重叠，且整组排在并发组之后', async () => {

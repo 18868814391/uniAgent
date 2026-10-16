@@ -25,6 +25,9 @@ files:
   - harness/**
   - build/**
   - package.json
+  # 显式排除同步工具：oss-sync/ 里含内网域名、仓库名等企业字面量，
+  # 绝不能进安装包。它是白名单之外的目录，这里再写一条双保险。
+  - '!oss-sync/**'
 
 # 复用 node_modules 里已下载的 Electron，避免打包时再从 GitHub 下载
 electronDist: node_modules/electron/dist

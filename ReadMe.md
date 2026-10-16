@@ -42,7 +42,9 @@ yarn test           # node:test 单测
 - **Excel / Word / PPT / PDF**：内置技能 + 预置脚本（openpyxl / pandas / markitdown / pycel / python-docx / pptxgenjs / pypdf）。
 - **Skill / Memory**：AI 可读写 `.md` 技能与记忆文件，并与应用内置技能库合并。
 - **多会话 / 归档 / 上下文压缩 / 断点续跑 / 任务清单 / 子代理并行 / 任务提醒**：见「界面与机制」。
-- **角色系统**：通用 / 产品 / 测试 / Excel专家 / 法务专家 / 开发，各自加载 `harness/` 下独立的系统提示词 + 技能 + 约定。
+- **单一默认助手 + 场景技能**：本开源版**没有角色切换机制**。应用以一个「默认助手」身份工作（`harness/roles/dev/system-prompt.md`），
+  同时具备通用对话、文件处理与开发改码能力；产品 / 测试 / 法务 / Excel 四类专业方法论以**技能**形式提供（`harness/skills*`），
+  由默认助手按**用户意图**主动 `read_skill` 加载（说"审合同"→`legal-*`，说"写 PRD"→`pm-*`），不再需要先切角色。
 - **法务检索**：国家法律法规数据库（flk.npc.gov.cn）接口检索 + 官方直链下载（`download_url`，域名白名单）。
 - **主题系统**：20+ 套配色 + 自定义主色 + 字号档位。
 
@@ -55,7 +57,7 @@ yarn test           # node:test 单测
 - **上下文压缩**：超模型窗口 60% 时压缩更早历史为摘要，保留最近 3 轮原文；摘要落 sidecar。
 - **网络状态点**：顶栏小圆点反映「当前网络到模型服务」的好坏（抖动/超时数），非「Key 配没配」。
 - **任务提醒**：长任务完成/异常/反问挂起时发**系统通知**（窗口不在前台时唯一可见的渠道）。
-- **开发角色操作分级**：项目内（git 仓库内）免确认、系统级路径弹确认框、毁机级命令硬拦截。
+- **操作分级**：默认助手拥有全量文件读写权限 —— 项目内（git 仓库内）免确认、系统级路径弹确认框、毁机级命令硬拦截。
 
 ---
 
@@ -70,13 +72,14 @@ yarn test           # node:test 单测
 | 企业代码知识库 | 知识库 Git/zip 拉取、脱敏前后端副本（`electron/erp-kb.js`、内置 `erp-query` 技能） |
 | 代码仓库自动拉取 | 切换角色时自动 clone/pull 企业前后端仓库（`electron/role-repos.js`、`src/components/RoleRepoSync.vue`） |
 | ERP/MES 业务工具 | `query_erp` / `search_code` / `backend_code` / `open_erp` / `check_erp_permission` / `qa_page_permission`（`electron/tools/erp.js`） |
+| 角色切换机制 | 顶栏角色选择器、`settings.role` 的角色分支、按角色收窄的工具集与技能可见性（前端 `src/App.vue` + `electron/settings.js`）；**四个专业角色的方法论以技能保留**，见下 |
 | 角色权限分组 | 按登录人姓名匹配的角色切换白名单（`electron/userCheck.js`） |
 | 法律法规库 Git 拉取 | 依赖企业部署密钥的法规库同步（`electron/legal-kb.js`）；**法务角色的官网检索能力保留** |
 | 企业地址与密钥 | 所有内网域名、接口地址、仓库 token、发布/更新服务器地址、企业软件下载直链 |
 
 **保留**的是与具体企业无关的全部能力：对话、文件、代码检索、命令、网页测试、文件格式处理、技能/记忆、
-断点续跑、上下文压缩、子代理、任务清单、主题、角色框架（产品/测试角色的**方法论与技能完整保留**，
-只是把「读企业内网仓库」换成了「读你自己配置的代码目录」）。
+断点续跑、上下文压缩、子代理、任务清单、主题，以及产品 / 测试 / 法务 / Excel 的**完整方法论与技能**
+（只是把「切角色加载」换成「按用户意图调度技能」，并把「读企业内网仓库」换成「读你自己配置的代码目录」）。
 
 ---
 
@@ -88,10 +91,11 @@ yarn test           # node:test 单测
 | --- | --- | --- |
 | 自己系统的业务数据查询 | 新建 `electron/tools/<你的系统>.js` + `electron/tool-schemas.js` + `electron/tools/index.js` | 照 `download_url` 的写法加一个工具；提示词段加在 `electron/settings.js` 的 `buildSystemPrompt` |
 | 自己的代码/文档知识库 | 新建 `electron/<你的>kb.js`，在 `electron/main.js` 里 `registerIpc()` | 参考被移除的 `erp-kb.js` 结构（IPC 三件套：download / getStatus / delete） |
-| 业务代码目录（产品/测试角色读代码） | `electron/settings.js` 的 `resolvePlaceholders` | 把 `{{CODE_REPO_DIR}}` 替换为你希望 AI 读的代码根目录（默认解析为「授权目录里的第一个 git 仓库」） |
+| 业务代码目录（产品/测试场景读代码） | `electron/settings.js` 的 `resolvePlaceholders` | 把 `{{CODE_REPO_DIR}}` 替换为你希望 AI 读的代码根目录（默认解析为「授权目录里的第一个 git 仓库」） |
 | 登录 / 账号体系 | 新建 `electron/auth.js`，在 `main.js` 装配，前端加遮罩组件 | 需要自己设计；系统提示词里的用户上下文段在 `settings.js` 的 `buildSystemPrompt` |
 | 自动更新 | `electron-builder.yml` 的 `publish` | 开源版默认**不配置**发布源；填上你自己的 generic 服务器或 GitHub Releases 地址 |
-| 角色与技能 | `harness/` | 角色系统提示词 / 技能 / 约定都在这里，可整体增删；新增角色记得同步 `harness/harness.json` 与 `electron/settings.js` 的 `HARNESS_ROLES` |
+| 技能与场景 | `harness/` | 系统提示词 / 技能 / 约定都在这里，可整体增删；技能库由 `electron/tools/skills.js` 的 `getSkillDirs()` 全量挂载，新增技能目录要在那里登记 |
+| 恢复「多角色切换」 | `electron/settings.js` 的 `buildRolePromptSection()` + `electron/tools/skills.js` 的 `getSkillDirs()` + `src/App.vue` 的角色选择器 | 企业版 `localAi` 是完整参考实现（三处配套即可）；企业版已移除，需从企业版仓库取回 |
 
 ---
 
@@ -112,7 +116,7 @@ electron/
   browser-test.js    网页测试驱动（沙箱化 BrowserWindow）
   preload.js         contextBridge 暴露 window.electronAPI
 src/                 Vue 3 渲染层（App.vue / components / stores）
-harness/             角色物料库（角色提示词 + 技能 + 约定）
+harness/             物料库（默认助手提示词 + 各场景技能 + 约定）
 skills/              应用内置技能库（xlsx / docx / pptx / pdf / claude-api 等）
 tests/               node:test 单测（node tests/xxx.test.js）
 oss/                 本开源版的说明与校验脚本（不属于上游共享代码）

@@ -31,40 +31,6 @@
             <line x1="12" y1="17" x2="12.01" y2="17" />
           </svg>
         </button>
-        <!-- Role Selector（通用 / 产品 / 测试） -->
-        <div class="role-picker" ref="rolePickerRef">
-          <button
-            class="header-btn role-btn"
-            :class="{ active: showRolePicker }"
-            @click="toggleRolePicker"
-            :title="'当前角色：' + currentRole.label + '（产品=原型/PRD，测试=白盒审查+黑盒引导）'"
-          >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="8" r="4" />
-              <path d="M4 21c0-4 4-6 8-6s8 2 8 6" />
-            </svg>
-            <span class="role-btn-label">{{ currentRole.label }}</span>
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <polyline points="6 9 12 15 18 9" />
-            </svg>
-          </button>
-          <div v-if="showRolePicker" class="role-popup">
-            <div class="role-popup-title">AI 角色</div>
-            <button
-              v-for="r in roles"
-              :key="r.value"
-              class="role-option"
-              :class="{ active: store.settings.role === r.value, restricted: !store.canSwitchRole(r.value) }"
-              :disabled="!store.canSwitchRole(r.value)"
-              :title="store.canSwitchRole(r.value) ? '' : '您当前暂无该身份'"
-              @click="switchRole(r.value)"
-            >
-              <span class="role-option-name">{{ r.label }}</span>
-              <span class="role-option-desc">{{ r.desc }}</span>
-              <span v-if="!store.canSwitchRole(r.value)" class="role-option-locked">暂无权限</span>
-            </button>
-          </div>
-        </div>
         <!-- Theme Color Picker -->
         <div class="theme-picker" ref="themePickerRef">
           <button
@@ -166,37 +132,6 @@ import NetStatusDot from '@/components/NetStatusDot.vue'
 const store = useAppStore()
 const showThemePicker = ref(false)
 const themePickerRef = ref(null)
-const showRolePicker = ref(false)
-const rolePickerRef = ref(null)
-
-// 可选角色：通用 / 产品 / 测试（产品与测试角色各自加载 harness 物料库：技能、系统提示词）
-const roles = [
-  { value: 'general', label: '通用角色', desc: '日常问答、文件、技能、ERP 查询' },
-  { value: 'excel', label: 'Excel专家', desc: '数据分析/清洗/公式/图表/批量处理' },
-  { value: 'legal', label: '法务专家', desc: '合同审查/条款抽取/风险标注/文书草拟（附免责声明）' },
-  { value: 'product', label: '产品角色', desc: '原型设计 / PRD，对齐已有前端 UI，可反问澄清' },
-  { value: 'qa', label: '测试角色', desc: '白盒测试为主（代码路径+用例→测试报告），黑盒为辅（用户引导浏览器操作）' },
-  { value: 'dev', label: '开发角色', desc: '全量文件访问，开发调试' },
-]
-
-const currentRole = computed(() => {
-  return roles.find(r => r.value === store.settings.role) || roles[0]
-})
-
-async function switchRole(value) {
-  if (value === store.settings.role) {
-    showRolePicker.value = false
-    return
-  }
-  showRolePicker.value = false
-  await store.switchRole(value)
-}
-
-// 打开角色面板
-function toggleRolePicker() {
-  showRolePicker.value = !showRolePicker.value
-}
-
 // Full theme definitions with all CSS variables
 const themes = [
   // ===== 深色系 =====
@@ -507,9 +442,6 @@ function onClickOutside(e) {
   if (showThemePicker.value && themePickerRef.value && !themePickerRef.value.contains(e.target)) {
     showThemePicker.value = false
   }
-  if (showRolePicker.value && rolePickerRef.value && !rolePickerRef.value.contains(e.target)) {
-    showRolePicker.value = false
-  }
 }
 
 onMounted(async () => {
@@ -699,128 +631,6 @@ onUnmounted(() => {
 .header-btn.active {
   background: var(--accent);
   color: white;
-}
-
-/* Role Selector（通用 / 产品 / 测试） */
-.role-picker {
-  position: relative;
-}
-
-.role-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  width: auto;
-  padding: 0 8px;
-  font-size: calc(12px * var(--font-scale));
-  color: var(--text-secondary);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  background: var(--bg-input);
-  transition: all 0.2s;
-}
-
-.role-btn:hover {
-  border-color: var(--accent);
-  color: var(--text-primary);
-}
-
-.role-btn.active {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-soft);
-}
-
-.role-btn-label {
-  max-width: 72px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.role-popup {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 12px;
-  min-width: 240px;
-  box-shadow: var(--shadow);
-  z-index: 100;
-  animation: fadeIn 0.15s ease;
-}
-
-.role-popup-title {
-  font-size: calc(12px * var(--font-scale));
-  color: var(--text-muted);
-  margin-bottom: 8px;
-  font-weight: 500;
-}
-
-.role-option {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  width: 100%;
-  padding: 9px 12px;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: all 0.2s;
-  text-align: left;
-  margin-bottom: 6px;
-}
-
-.role-option:last-child {
-  margin-bottom: 0;
-}
-
-.role-option:hover {
-  border-color: var(--accent);
-}
-
-.role-option.active {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-}
-
-/* 受限角色（当前用户无权限切换）：灰显并加"暂无权限"徽标 */
-.role-option.restricted {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
-.role-option.restricted:hover {
-  border-color: var(--border);
-}
-
-.role-option-locked {
-  align-self: flex-start;
-  margin-top: 1px;
-  padding: 1px 6px;
-  font-size: calc(10px * var(--font-scale));
-  color: var(--danger);
-  border: 1px solid rgba(239, 68, 68, 0.4);
-  border-radius: 999px;
-  background: rgba(239, 68, 68, 0.08);
-}
-
-.role-option-name {
-  font-size: calc(13px * var(--font-scale));
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.role-option.active .role-option-name {
-  color: var(--accent);
-}
-
-.role-option-desc {
-  font-size: calc(11px * var(--font-scale));
-  color: var(--text-muted);
 }
 
 /* Theme Color Picker */

@@ -706,16 +706,6 @@ export const useAppStore = defineStore('app', () => {
     currentState.value.askUser = null
   }
 
-  // 角色标签映射：仅用于无权限时的提示文案
-  const ROLE_LABELS = {
-    general: '通用角色',
-    product: '产品角色',
-    qa: '测试角色',
-    excel: 'Excel专家',
-    legal: '法务专家',
-    dev: '开发角色',
-  }
-
   // ========== 角色代码仓库（企业版：切身份自动拉取内网仓库） ==========
   // 开源版没有该能力：产品 / 测试角色改为读用户在设置里授权的代码目录
   // （占位符 {{CODE_REPO_DIR}}，见 electron/settings.js 的 getCodeRepoDir）。
@@ -1188,7 +1178,6 @@ export const useAppStore = defineStore('app', () => {
     clearNetHealthFailure,
     loadSettings,
     saveSettings,
-    canSwitchRole,
     checkLogin,
     // 公共试用模型（「立即试用」按钮 / 启动自动更新）
     applyTrialProfile,
@@ -1242,11 +1231,9 @@ export const useAppStore = defineStore('app', () => {
     continueTurn,
     stopCurrentStream,
     isConvStreaming,
-    // 角色（通用/产品）与 AI 提问卡片（ask_user）；角色通过 settings.role 访问
+    // AI 提问卡片（ask_user）
     askUser,
     answerAskUser,
-    switchRole,
-    roleNeedsRepo,
     // File Attachments
     attachedFiles,
     attachFiles,

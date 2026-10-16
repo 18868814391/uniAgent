@@ -281,7 +281,8 @@ function loadSettings() {
     // `notifyOnTaskEnd: false` 在此被自然丢弃，处理方式与 thinkingEnabled 相同。
     notifyOnTaskEnd: true,
     // 思考模式：恒为开启，无开关（老 settings.json 里遗留的 thinkingEnabled 字段在此被自然丢弃）
-    role: HARNESS_ROLES.includes(raw.role) ? raw.role : 'general',
+    // 开源版：无角色概念，恒为默认助手（'dev' = 全量文件权限 + 全量工具）
+    role: 'dev',
     modelProfiles: normalizeProfiles(raw.modelProfiles, raw),
     activeProfileId: typeof raw.activeProfileId === 'string' ? raw.activeProfileId : DEEPSEEK_PROFILE_ID,
   }
@@ -424,7 +425,8 @@ function buildSystemPrompt(allowedDirs = [], userMessages = [], profile = null) 
   }
   // 通用角色也能直接处理 Excel（业务员常忘记切换到 Excel专家角色）：
   // 已在 skills.js 放开 xl-* 技能可见性，这里补一份轻量护栏（Excel专家角色已有完整规范，不重复注入）。
-  const isGeneral = !HARNESS_ROLES.includes(state.settings.role)
+  // 开源版：无角色概念 —— 表格护栏对所有场景恒生效（Excel 技能也已全量挂载）
+  const isGeneral = true
   const xlLiteNote = isGeneral
     ? `
 【表格文件通用护栏（不切换 Excel专家 角色也能安全处理，重要）】
@@ -452,16 +454,13 @@ function buildSystemPrompt(allowedDirs = [], userMessages = [], profile = null) 
     : 'Your file access is limited to these directories:'
 
   // ------------------------------------------------------------
-  //  dev 角色**不带** ERP / 浏览器类工具（工具集已在 chat.js 的 DEV_TOOL_NAMES 收窄到 19 个），
   //  所以下面两段"教你用 browser_* / read_file / grep_code / read_file"的说明
   //  对它是**指向不存在的工具** —— 整段不注入，否则模型会反复尝试调用不存在的工具、白烧往返。
   //  dev 定位代码的路径写在 harness/roles/dev/system-prompt.md（本机仓库 + grep_code / glob_files）。
   //  起因见 changes.md「dev 角色工具集收窄 + 一轮内工具并发执行」（2026-09-30）。
   //  ⚠️ 这两段的正文里**不能出现反引号**（它们本身就是模板字符串）。
   // ------------------------------------------------------------
-  const webTestSection = isDevRole
-    ? ''
-    : `【网页测试 — 测试网页、网页自动化、打开网站时使用 browser_* 原生工具】
+  const webTestSection = `【网页测试 — 测试网页、网页自动化、打开网站时使用 browser_* 原生工具】
 - 打开/跳转网页 → browser_open(url)
 - 查看可交互元素 → browser_snapshot(max)  # 返回按钮/输入框等紧凑清单，每项带 "ref"（不再返回 CSS 选择器，最省 token）；另给 total（全部候选数，判断是否被截断）与 duplicates（重名统计）。**先看一次拿到 ref 就够，别每步都调**
 - **批量执行一串步骤 → browser_flow(steps)**  # 首选节奏。一次传 [{action, target, value}] 顺序执行并可带断言，失败即停、回传失败那步的上下文与当前快照。20 步只花 1 次往返（逐步点击要 40+ 次）。action：click / type / press / wait / goto / sleep / assertText / assertValue / assertVisible / assertUrl / assertEval
@@ -490,15 +489,9 @@ ${visionCapable ? '- **看页面里的图 → browser_read_images(max)**  # 把�
   //  ⚠️ 修改这段时注意：这里与 chat.js 的 browser_read_images 下发闸门必须同源
   //     （都读 profile.vision）—— 提示词说"你能看图"但工具没下发，模型会反复尝试调用不存在的工具。
   // ------------------------------------------------------------
-  // dev 角色的取图路径与其它角色**不同**：它没有任何 browser_*（DEV_TOOL_NAMES），
   // 所以不能让它读到"用 browser_read_images 取图"——那是它没有的工具。
   // 但 dev 依然要能看图：它有 read_image（本机图片）+ execute_command（可把网页图 curl 到本地）。
-  const visionHowTo = isDevRole
-    ? `- 图在哪就去哪取（本角色没有浏览器类工具，别惦记 browser_*）：
-  - **本机图片文件**（用户给的路径、从 wiki/文档下载或抽出来的图、自己导出的截图）→ read_image(path)，图片会附在你的下一条消息里。
-  - **网页里的图** → 先用 execute_command 把它下载到本地（如 curl -o），再 read_image 看它；页面正文用 curl / read_file 读原始 HTML。
-  - **用户直接贴的 https 图片直链**、或用附件发的本地图片 → 已经在消息里了，直接看图作答。`
-    : `- 图在哪就去哪取：
+  const visionHowTo = `- 图在哪就去哪取：
   - **本机图片文件**（用户给的路径、从 wiki/文档下载或抽出来的图、自己导出的截图）→ read_image(path)，图片会附在你的下一条消息里。
   - **用户直接贴的 https 图片直链**（.png / .jpg / .jpeg / .webp）、或用附件发的本地图片 → 已经在消息里了，直接看图作答。
   - **网页里的图**（用户给了网址、或让你"看看这个页面"）→ 先 browser_open(url) → 再 browser_read_images 取图 → 需要正文再用 browser_get_page()。`
@@ -616,15 +609,14 @@ Always explain what you're doing before executing file operations.` +
     buildRolePromptSection()
 }
 
-// 角色系统提示词段落：产品/测试角色时读取对应 harness 物料库注入，通用角色返回空串（保持原行为）
-const ROLE_LABELS = { product: '产品角色', qa: '测试角色', excel: 'Excel专家', dev: '开发角色', legal: '法务专家' }
+// 开源版：只有一份「默认助手」系统提示词（harness/roles/dev/system-prompt.md），
+// 内含「场景调度」段 —— 由模型按用户意图 read_skill 加载产品/测试/法务/Excel 技能。
+const ROLE_LABELS = { dev: '默认助手' }
 function buildRolePromptSection() {
-  if (!HARNESS_ROLES.includes(state.settings.role)) return ''
-  const label = ROLE_LABELS[state.settings.role] || state.settings.role
-  const raw = readHarnessRolePrompt(state.settings.role)
-  let section = `\n\n【当前角色：${label}】\n`
+  const raw = readHarnessRolePrompt('dev')
+  const section = '\n\n【默认助手】\n'
   if (!raw) {
-    return section + `（${label}提示词文件缺失，本次按通用角色能力工作）`
+    return section + '（提示词文件缺失，本次按基础能力工作）'
   }
   return section + resolvePlaceholders(raw)
 }
@@ -685,7 +677,7 @@ function sanitizeSettings() {
     allowedDirs: Array.isArray(state.settings.allowedDirs) ? [...state.settings.allowedDirs] : [],
     autoExecute: !!state.settings.autoExecute,
     notifyOnTaskEnd: state.settings.notifyOnTaskEnd !== false,
-    role: HARNESS_ROLES.includes(state.settings.role) ? state.settings.role : 'general',
+    role: 'dev',
   }
 }
 
@@ -806,7 +798,7 @@ function registerIpc() {
       allowedDirs: Array.isArray(state.settings.allowedDirs) ? [...state.settings.allowedDirs] : [],
       autoExecute: !!state.settings.autoExecute,
       notifyOnTaskEnd: state.settings.notifyOnTaskEnd !== false,
-      role: HARNESS_ROLES.includes(state.settings.role) ? state.settings.role : 'general',
+      role: 'dev',
     }
   })
 
@@ -833,7 +825,7 @@ function registerIpc() {
     // notifyOnTaskEnd 恒定 true：开关已从设置页撤下，这里**刻意不接**该字段
     // （旧前端 / 残留调用传来的 false 一律静默忽略），确保任务提醒不会被谁关掉。
     state.settings.notifyOnTaskEnd = true
-    if (rest.role === 'general' || HARNESS_ROLES.includes(rest.role)) state.settings.role = rest.role
+    // 开源版无角色概念：settings.role 恒为 'dev'，不接受前端改写
     saveSettings()
     console.log('[settings] saved, allowedDirs:', JSON.stringify(state.settings.allowedDirs))
     return sanitizeSettings()

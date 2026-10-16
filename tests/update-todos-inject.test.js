@@ -298,7 +298,7 @@ test('第 40 轮的轮次提醒与任务清单合并成同一条消息，而不�
   assert.equal(count, 1, `第 40 轮首次注入时不应出现多条轮次提醒（实际 ${count}）`)
 })
 
-test('工具下发：全角色都能拿到 update_todos；dev 的白名单仍收窄其他工具', async () => {
+test('工具下发：全角色都能拿到 update_todos；开源版不做工具收窄', async () => {
   for (const role of ['dev', 'general', 'product', 'qa', 'excel', 'legal']) {
     resetState(role)
     const req = []
@@ -306,26 +306,9 @@ test('工具下发：全角色都能拿到 update_todos；dev 的白名单仍收
     await chat.handleChatSend(event(), payload())
     const names = (req[0].tools || []).map((t) => t.function.name)
     assert.ok(names.includes('update_todos'), `${role} 角色也应拿到 update_todos（2026-09-30 起放开）`)
+    assert.ok(names.includes('read_file'), `${role} 应拿到改码工具`)
+    assert.ok(names.includes('browser_open'), `${role} 应拿到浏览器工具（开源版不按角色收窄）`)
   }
-
-  // dev 仍受白名单约束：白名单外的工具不下发
-  resetState('dev')
-  const devReq = []
-  currentFetch = makeFetch(devReq, 0)
-  await chat.handleChatSend(event(), payload())
-  const devNames = (devReq[0].tools || []).map((t) => t.function.name)
-  assert.ok(devNames.includes('read_file'), 'dev 白名单内的工具必须保留')
-  assert.equal(devNames.includes('browser_open'), false, 'dev 白名单外的工具不应下发')
-
-  // 非 dev 不受 dev 白名单约束
-  resetState('general')
-  const genReq = []
-  currentFetch = makeFetch(genReq, 0)
-  await chat.handleChatSend(event(), payload())
-  assert.ok(
-    (genReq[0].tools || []).map((t) => t.function.name).includes('browser_open'),
-    'general 不受 dev 白名单约束'
-  )
 })
 
 test('settings.todosEnabled = false 时不下发（照 subAgentsEnabled 的开关模式：undefined 视为开）', async () => {

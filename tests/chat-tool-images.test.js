@@ -330,7 +330,7 @@ test('用户自己带了图片附件（数组 content）：提醒追加进同一
 // ============================================================
 const toolNamesOf = (body) => (body.tools || []).map((t) => t.function.name)
 
-test('dev 角色 + 读图开启：下发 read_image（本机图片），但不给 browser_read_images', async () => {
+test('默认助手 + 读图开启：本机取图与网页取图两个工具都下发', async () => {
   currentProfile.vision = true
   stateStub.settings.role = 'dev'
   currentFetch = mockFetch([[stopChunk()]])
@@ -338,8 +338,8 @@ test('dev 角色 + 读图开启：下发 read_image（本机图片），但不�
   await chat.handleChatSend(makeEvent(), payload())
 
   const names = toolNamesOf(bodies[0])
-  assert.ok(names.includes('read_image'), 'dev 必须能看本机图片文件（本次事故的直接原因就是没有这个入口）')
-  assert.equal(names.includes('browser_read_images'), false, 'dev 没有 browser_* 工具，别下发')
+  assert.ok(names.includes('read_image'), '要能看本机图片文件')
+  assert.ok(names.includes('browser_read_images'), '开源版不做工具收窄，网页取图工具也要下发')
 })
 
 test('dev 角色 + 读图关闭：连 read_image 也不下发（纯文本模型收图片会 400）', async () => {

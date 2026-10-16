@@ -1,6 +1,6 @@
 # AGENTS.md — Local AI（开源版）
 
-给在**本仓库**里改代码的 AI 智能体（开发角色「小匠」）看的工程约定。
+给在**本仓库**里改代码的 AI 智能体（默认助手）看的工程约定。
 
 > ⚠️ **本仓库是 Local AI 的开源版**，由企业版通过 `rules.mjs` 规则化裁剪生成。
 > 因此：**不要试图恢复**登录、平台切换、企业知识库、代码仓库自动拉取、ERP/MES 业务工具 ——
@@ -61,8 +61,18 @@ C:/Users/syf/.workbuddy/binaries/node/versions/22.22.2-3/node.exe --check <文�
 ## 系统提示词拼装
 
 `settings.js` 的 `buildSystemPrompt(allowedDirs, userMessages)` 是所有注入的汇合点，
-末尾依次追加：角色系统提示词 → Excel 提示 → 技能清单 → 项目级上下文（AGENTS.md）。
+末尾依次追加：默认助手系统提示词（`harness/roles/dev/system-prompt.md`，内含「场景调度」段）→ Excel 提示 → 技能清单 → 项目级上下文（AGENTS.md）。
 后两者包了 try/catch 的 Safe 包装：**注入失败必须降级为空串，不能让主流程挂掉**。新增注入段照此模式写。
+
+## 角色机制（本开源版已移除）
+
+**本版没有角色切换**：`settings.role` 恒为 `'dev'`，系统提示词只有 `harness/roles/dev/system-prompt.md` 一份，
+所有技能库（`skills` / `skills-qa` / `skills-excel` / `skills-legal` / `skills-dev`）对助手**全部可见**，
+由提示词的「场景调度」段引导它按用户意图 `read_skill` 加载。
+产品 / 测试 / 法务 / Excel 的 `roles/*/system-prompt.md` 仅作**参考物料**保留，不再注入。
+
+- **不要再引入**按角色收窄工具集（`DEV_TOOL_NAMES` 白名单已移除）或按 `role` 分支的提示词注入 —— 那正是本版刻意去掉的。
+- 想恢复多角色，参考企业版（`buildRolePromptSection` + `getSkillDirs` + 前端角色选择器，三处配套）。
 
 ## 占位符（`resolvePlaceholders`）
 
@@ -92,8 +102,9 @@ C:/Users/syf/.workbuddy/binaries/node/versions/22.22.2-3/node.exe --check <文�
 ## 与上游同步
 
 本仓库由企业版用规则化裁剪生成（企业业务相关部分不参与同步）。
-**改本仓库代码时注意**：改动若落在「共享文件」上，下次同步会被上游覆盖 —— 这类改动应当回到
-企业版的 `oss-sync/rules.mjs` 里加规则。详见 `oss/README.md`。
+**改本仓库代码时注意**：改动若落在「共享文件」上，下次同步会被上游覆盖。
+同步工具（`oss-sync/`）位于**企业版私有仓库内**（`localAi/oss-sync/`），不随本仓库发布 ——
+要变更同步行为，找维护者改该目录的 `rules.mjs`。详见 `oss/README.md`。
 
 ## 应用身份（改之前先看）
 
@@ -107,11 +118,13 @@ C:/Users/syf/.workbuddy/binaries/node/versions/22.22.2-3/node.exe --check <文�
 - `userData` **必须显式 `setPath`**，否则会与企业版共用 `%APPDATA%` 目录（配置 / 会话互相覆盖）。
 - AUMID 必须与 `electron-builder.yml` 的 `appId` 一致，否则打包版可能**完全不弹系统通知**。
 - 代码签名与「能否并存」无关（只影响 SmartScreen）；签名请用 `CSC_LINK` / `CSC_KEY_PASSWORD` 环境变量，不要提交证书。
-- 同步机制：这几处由上游 `oss-sync/rules.mjs` 的「应用身份隔离」规则组生成。**在本仓库直接改会被下次同步覆盖**，
-  要改就回上游加规则。
+- 同步机制：这几处由同步工具的 `rules.mjs`「应用身份隔离」规则组生成。**在本仓库直接改会被下次同步覆盖**，
+  要改就找维护者在同步工具里加规则。
 
 ## 禁忌
 
 - 不做没被要求的优化：不顺手重构、不改无关格式、不「顺便」升级依赖。
 - 改完代码不主动 `git commit` / `git push`。
 - **不要重新引入被移除的企业能力**（登录 / 平台切换 / 企业知识库 / 代码自动拉取 / ERP 工具）。
+- **不要重新引入角色切换机制**（顶栏角色选择器、按 `role` 分支的提示词与工具集、按角色挂载技能库）——
+  本版刻意改为「单一默认助手 + 按用户意图调度的场景技能」，见上文「角色机制」。
