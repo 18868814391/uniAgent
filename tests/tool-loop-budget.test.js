@@ -1,18 +1,20 @@
-// 工具循环的轮次预算 + 重复调用检测 —— 回归测试
+// 工具循环的收口策略 + 重复调用检测 —— 端到端回归测试
 //
-// 背景（2026-09-29 实测）：改代码时「卡住」，最后报
-//   「AI 工具调用轮次已达上限，尚未给出最终回答 / AI 已连续调用 60 轮工具」。
-// 根因不是卡死，是模型**不知道轮次有上限**，一路做探索性检索直到 loop 跑满；
-// 此时再走兜底请求往往也失败（上下文攒了 60 轮工具历史）。
+// 背景（2026-10-05 重构）：旧实现是「`TOOL_LOOP_LIMIT = 60` 硬上限 + 跑满兜底逼答 +
+// 第 40/45/50/55 轮提醒」。问题：步数与「有没有干成事」无关 —— 长任务被平白截断，
+// 而模型只能抢在提醒点之前收敛。
 //
-// 两个对策：① 剩余轮数不多时注入「轮次提醒」逼它收敛；
-//          ② 同一 (工具名, 参数) 连续重复 → 第 2 次附警告、第 3 次拦下不执行。
+// 现在工具循环是 `for(;;)`，**内核没有最大步数**；收口只依据**进展判据**：
+// 连续多轮没拿到新信息（本轮调用的 (工具名, 参数) 组合以前全用过、清单也没变）
+// 才逐级升级 warn(2) → wrapup(3) → stop(4)，stop 时跳出循环交给「不带工具的兜底请求」。
+// 阈值/文案/状态机的纯函数单测见 tests/tool-loop-policy.test.js，本文件只管接线是否正确。
 //
-// 这里锁住四条不变量：
-//   1) 提醒只在剩余不足时出现，且按固定间隔，不是每轮都塞（白花 token）
-//   2) 提醒文案带「已用几轮 / 共几轮 / 还剩几轮」三个数字，模型才知道还剩多少
-//   3) 重复计数是「跨轮次、紧邻」语义：中间夹一次不同调用必须清零
-//   4) 拦截回传是合法 JSON 且带 blocked 标记，模型能据此改道
+// 这里锁住五条不变量：
+//   1) **长任务不会被步数截断**：跑 70 轮不同的读取也照样继续，只在软预算点提醒一次工作量
+//   2) 原地打转：重复调用只放行前 2 次（第 2 次附警告），第 3 次起拦下
+//   3) 停滞到第 4 轮内核跳出 → 走兜底请求；兜底成功=complete，兜底失败=max_iterations
+//   4) 消息序列始终合法：assistant(tool_calls) 后必须紧跟对应数量的 tool 消息
+//   5) 正常收敛的任务不会被任何提醒打扰，也不触发收口
 //
 // chat.js 是 CJS 且加载即 require('electron')，故先把依赖塞进 require.cache。
 // 桩列表与 tool-result-window.test.js / chat-abort.test.js 保持一致。
@@ -85,63 +87,25 @@ stub('./turn-snapshot', {
 
 const chat = require(CHAT)
 const {
-  TOOL_LOOP_LIMIT,
-  shouldWarnBudget,
-  budgetWarnText,
+  loopPolicy,
   trackRepeatCall,
   repeatWarnText,
   repeatBlockText,
 } = chat
 
 // ============================================================
-//  轮次预算提醒
+//  没有步数上限（策略层）
 // ============================================================
 
-test('轮次上限是常量，且模板里不再硬编码 60 文案', () => {
-  assert.equal(TOOL_LOOP_LIMIT, 60)
-})
-
-test('提醒只在剩余不足时出现，且按间隔节流', () => {
-  // 前 39 轮（0-based loop 0~39）不提醒
-  for (let loop = 0; loop < 40; loop++) {
-    assert.equal(shouldWarnBudget(loop), false, `第 ${loop} 轮不该提醒`)
-  }
-  // 第 40 轮起提醒
-  assert.equal(shouldWarnBudget(40), true, '第 40 轮应提醒')
-  // 之后每 5 轮一次：41~44 不提醒，45 提醒
-  for (let loop = 41; loop <= 44; loop++) {
-    assert.equal(shouldWarnBudget(loop), false, `第 ${loop} 轮不该提醒（未到间隔）`)
-  }
-  assert.equal(shouldWarnBudget(45), true)
-  assert.equal(shouldWarnBudget(50), true)
-  assert.equal(shouldWarnBudget(55), true)
-  // 4 次提醒足够，不该每轮都塞
-  const warns = []
-  for (let loop = 0; loop < TOOL_LOOP_LIMIT; loop++) if (shouldWarnBudget(loop)) warns.push(loop)
-  assert.deepEqual(warns, [40, 45, 50, 55], `提醒点应为 [40,45,50,55]，实际 ${JSON.stringify(warns)}`)
-})
-
-test('提醒文案必须带「已用 / 共 / 还剩」三个数字', () => {
-  const t = budgetWarnText(40)
-  assert.match(t, /40\/60/, '要写明已用 40 / 共 60')
-  assert.match(t, /剩余约 20 轮/, '要写明还剩多少轮 —— 模型不知道上限正是问题根源')
-  assert.match(t, /收敛|最终回答/, '要明确要求收敛并给出回答')
-
-  // 边界：最后一轮
-  const last = budgetWarnText(59)
-  assert.match(last, /剩余约 1 轮/)
-  // 不该出现负数
-  assert.doesNotMatch(budgetWarnText(80), /剩余约 -/)
-})
-
-test('shouldWarnBudget 对非法入参安全', () => {
-  assert.equal(shouldWarnBudget(NaN), false)
-  assert.equal(shouldWarnBudget(undefined), false)
-  assert.equal(shouldWarnBudget(null), false)
+test('工具循环没有步数上限：只有防死循环的绝对刹车', () => {
+  assert.ok(loopPolicy.ABSOLUTE_STEP_CEILING >= 200, '绝对刹车是保险丝量级，不是预算')
+  assert.equal(chat.TOOL_LOOP_LIMIT, undefined, '旧的 60 轮硬上限常量必须已移除')
+  assert.equal(chat.shouldWarnBudget, undefined, '「剩余轮数」提醒已随硬上限一并移除')
+  assert.equal(chat.budgetWarnText, undefined)
 })
 
 // ============================================================
-//  重复调用检测
+//  重复调用检测（行为不变：第 2 次附警告、第 3 次起拦下）
 // ============================================================
 
 test('连续重复才计数：首次 0、第 2 次 1、第 3 次 2', () => {
@@ -172,7 +136,7 @@ test('工具名相同但参数不同 → 不算重复（合法的连续读多个
   }
 })
 
-test('参数是对象时也能稳定比较（顺序无关的写法差异除外）', () => {
+test('参数是对象时也能稳定比较', () => {
   const st = { lastSig: '', streak: 0 }
   assert.equal(trackRepeatCall(st, 'read_file', { path: 'a.js' }), 0)
   assert.equal(trackRepeatCall(st, 'read_file', { path: 'a.js' }), 1, '同一对象字面量应判为重复')
@@ -203,14 +167,52 @@ test('拦截文案的 JSON 不会被参数里的特殊字符破坏', () => {
 })
 
 // ============================================================
-//  端到端：模拟「模型永不收敛」的真实工具循环
+//  端到端：真实工具循环接线
 // ============================================================
 
 const enc = new TextEncoder()
 const sseLine = (obj) => `data: ${JSON.stringify(obj)}\n\n`
 
-/** 造一个 SSE 流响应：模型每轮都返回同一个 read_file 调用（模拟死循环）。
- *  fallbackText 决定兜底那发（不带 tools）返回什么 —— 空串即模拟「兜底也失败」。 */
+/** 把若干 SSE 文本片段包成 fetch 响应（每次 read 吐一段）。 */
+function streamOf(parts) {
+  let i = 0
+  return {
+    ok: true,
+    body: {
+      getReader: () => ({
+        read: async () => (i < parts.length ? { done: false, value: enc.encode(parts[i++]) } : { done: true, value: undefined }),
+      }),
+    },
+  }
+}
+
+/** 一轮「带工具调用」的流式响应 */
+function toolCallParts(id, name, args) {
+  return [
+    sseLine({
+      choices: [{
+        delta: {
+          tool_calls: [{ index: 0, id, type: 'function', function: { name, arguments: args } }],
+        },
+      }],
+    }),
+    sseLine({ choices: [{ delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }),
+    'data: [DONE]\n\n',
+  ]
+}
+
+/** 一轮「纯文本收尾」的流式响应 */
+function textParts(text) {
+  return [
+    sseLine({ choices: [{ delta: { content: text }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }),
+    'data: [DONE]\n\n',
+  ]
+}
+
+/**
+ *  造一个 SSE 流响应：前 n 轮都返回**同一个** read_file 调用（模拟死循环），
+ *  之后（不会发生）返回正文。fallbackText 决定兜底那发（不带 tools）返回什么 —— 空串即「兜底也失败」。
+ */
 function neverConvergeFetch(requests, fallbackText = '') {
   return async (_url, init) => {
     const body = JSON.parse(init.body)
@@ -221,32 +223,25 @@ function neverConvergeFetch(requests, fallbackText = '') {
       return { ok: true, json: async () => ({ choices: [{ message: { content: fallbackText } }], usage: {} }) }
     }
 
-    const idx = requests.length
-    const parts = [
-      sseLine({
-        choices: [{
-          delta: {
-            tool_calls: [{
-              index: 0,
-              id: `c${idx}`,
-              type: 'function',
-              function: { name: 'read_file', arguments: '{"path":"C:/same.js","offset":1,"limit":100}' },
-            }],
-          },
-        }],
-      }),
-      sseLine({ choices: [{ delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }),
-      'data: [DONE]\n\n',
-    ]
-    let i = 0
-    return {
-      ok: true,
-      body: {
-        getReader: () => ({
-          read: async () => (i < parts.length ? { done: false, value: enc.encode(parts[i++]) } : { done: true, value: undefined }),
-        }),
-      },
+    const idx = requests.filter((r) => r.tools).length
+    return streamOf(toolCallParts(`c${idx}`, 'read_file', '{"path":"C:/same.js","offset":1,"limit":100}'))
+  }
+}
+
+/**
+ *  造一个「一路推进」的 SSE fetch：前 n 轮每轮读**不同**的文件（新签名 = 有进展），
+ *  第 n+1 轮给出最终回答。用于证明长任务不会被步数截断。
+ */
+function convergeAfterNFetch(requests, n, answer = '整理完成。') {
+  return async (_url, init) => {
+    const body = JSON.parse(init.body)
+    requests.push(body)
+    if (!body.tools) {
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '' } }], usage: {} }) }
     }
+    const idx = requests.filter((r) => r.tools).length
+    if (idx <= n) return streamOf(toolCallParts(`p${idx}`, 'read_file', `{"path":"C:/f${idx}.js"}`))
+    return streamOf(textParts(answer))
   }
 }
 
@@ -262,39 +257,8 @@ const payload = () => ({
   autoExecute: true,
 })
 
-test('端到端：模型反复调用同一工具 → 只执行 2 次、注入 4 条轮次提醒、兜底仍失败则报 max_iterations', async () => {
-  executed.length = 0
-  const requests = []
-  currentFetch = neverConvergeFetch(requests)
-
-  stateStub.settings = { allowedDirs: [], role: 'dev', autoExecute: true, subAgentsEnabled: false }
-  stateStub.chatRuns = new Map()
-
-  const ev = makeEvent()
-  await chat.handleChatSend(ev, payload())
-
-  // ① 重复调用只放行前 2 次（第 1 次正常 + 第 2 次附警告），第 3 次起一律拦下不执行
-  assert.equal(executed.length, 2, `只应执行前 2 次，实际执行了 ${executed.length} 次`)
-
-  // ② 第 2 次的结果里带警告，第 3 次起是 blocked 拦截
-  //    注意：每个请求都会重发全部历史，所以要基于**最后一个请求**统计，不能把所有请求加总。
-  const allToolMsgs = requests.flatMap((r) => (r.messages || []).filter((m) => m.role === 'tool'))
-  assert.ok(allToolMsgs.some((m) => m.content.includes('【注意】')), '第 2 次重复应附带警告')
-
-  const lastReq = requests.filter((r) => r.tools).pop()
-  const lastToolMsgs = (lastReq.messages || []).filter((m) => m.role === 'tool')
-  // 末尾这次请求是在第 60 轮**之前**发出的，所以含的是前 59 轮的结果（第 60 轮的还没产生）
-  assert.equal(lastToolMsgs.length, TOOL_LOOP_LIMIT - 1, `末尾请求应含 ${TOOL_LOOP_LIMIT - 1} 条工具结果`)
-  const blocked = lastToolMsgs.filter((m) => m.content.includes('"blocked":true'))
-  // 第 1 次正常执行、第 2 次带警告执行，第 3 次起全部拦下
-  assert.equal(blocked.length, lastToolMsgs.length - 2, `第 3 次起应被拦截（实际 ${blocked.length}/${lastToolMsgs.length}）`)
-
-  // ③ 轮次提醒：最后一个请求里应有 4 条（第 40/45/50/55 轮各注入一次）
-  const warns = (lastReq.messages || []).filter((m) => typeof m.content === 'string' && m.content.startsWith('【轮次提醒】'))
-  assert.equal(warns.length, 4, `应注入 4 条轮次提醒，实际 ${warns.length}`)
-  assert.match(warns[0].content, /40\/60/)
-
-  // ④ 消息序列合法：assistant(tool_calls) 之后必须紧跟对应数量的 tool 消息
+/** 每次请求都要满足的消息序列约束：assistant(tool_calls) 后紧跟等量的 tool 消息 */
+function assertLegalSequences(requests) {
   for (const r of requests) {
     const ms = r.messages || []
     let need = 0
@@ -307,15 +271,93 @@ test('端到端：模型反复调用同一工具 → 只执行 2 次、注入 4 
       if (m.role === 'assistant' && Array.isArray(m.tool_calls)) need = m.tool_calls.length
     }
   }
+}
 
-  // ⑤ 兜底也救不回来（模型照样不给答案）→ 明确报 max_iterations，且文案里带上限常量
+const toolRequests = (requests) => requests.filter((r) => r.tools)
+const hasText = (m, needle) => m && typeof m.content === 'string' && m.content.includes(needle)
+
+test('端到端：长任务（70 轮不同读取）不会被步数截断，只有软预算提醒', async () => {
+  executed.length = 0
+  const requests = []
+  currentFetch = convergeAfterNFetch(requests, 70)
+
+  stateStub.settings = { allowedDirs: [], role: 'dev', autoExecute: true, subAgentsEnabled: false }
+  stateStub.chatRuns = new Map()
+
+  const ev = makeEvent()
+  await chat.handleChatSend(ev, payload())
+
+  // ① 70 次工具调用一次都没被拦（旧实现跑到第 60 轮就被硬截断了）
+  assert.equal(executed.length, 70, `70 轮不同参数的读取都应执行，实际 ${executed.length}`)
+
+  // ② 全程没有任何「停滞/收口」提醒 —— 一直在推进
+  const allTexts = requests.flatMap((r) => (r.messages || []).map((m) => (typeof m.content === 'string' ? m.content : '')))
+  assert.ok(!allTexts.some((t) => t.startsWith('【进展提醒】')), '一路推进不该被判停滞')
+  assert.ok(!allTexts.some((t) => t.includes('【收口指令】')), '一路推进不该被要求收口')
+
+  // ③ 软预算点：20 / 35 / 50 各提醒一次「已用掉 N 轮」，且不提任何上限
+  const last = toolRequests(requests).pop()
+  const soft = last.messages.filter((m) => hasText(m, '【进度提醒】'))
+  assert.equal(soft.length, 3, `70 轮应依次跨过 20/35/50 三个软预算点，实际 ${soft.length}`)
+  const softText = soft.map((m) => m.content).join('\n')
+  for (const n of [20, 35, 50]) assert.match(softText, new RegExp(`已用掉 ${n} 轮`))
+  assert.ok(!soft.some((m) => /上限|还剩/.test(m.content)), '软预算提醒不该提任何上限/剩余轮数')
+
+  // ④ 模型自己给答案 → 正常完成，没有走兜底
+  const done = ev.sent.filter((e) => e.ch === 'chat:done')
+  assert.equal(done.length, 1)
+  assert.equal(done[0].payload.endReason, 'complete')
+  assert.ok(!requests.some((r) => !r.tools), '没有触发兜底请求')
+
+  assertLegalSequences(requests)
+})
+
+test('端到端：原地打转 → 只执行 2 次、停滞提醒逐级升级、兜底失败则报 max_iterations', async () => {
+  executed.length = 0
+  const requests = []
+  currentFetch = neverConvergeFetch(requests)
+
+  stateStub.settings = { allowedDirs: [], role: 'dev', autoExecute: true, subAgentsEnabled: false }
+  stateStub.chatRuns = new Map()
+
+  const ev = makeEvent()
+  await chat.handleChatSend(ev, payload())
+
+  // ① 重复调用只放行前 2 次（第 1 次正常 + 第 2 次附警告），第 3 次起一律拦下不执行
+  assert.equal(executed.length, 2, `只应执行前 2 次，实际执行了 ${executed.length}`)
+
+  // ② 停滞立即被收口：stall 2 → warn、stall 3 → wrapup、stall 4 → stop 跳出循环。
+  //    收口不看步数，所以整轮只有 5 次工具请求（旧实现要烧满 60 轮）。
+  const toolReqs = toolRequests(requests)
+  assert.equal(toolReqs.length, 5, `停滞收口应在第 5 次工具请求前生效，实际 ${toolReqs.length}`)
+
+  const lastReq = toolReqs.pop()
+  const lastToolMsgs = lastReq.messages.filter((m) => m.role === 'tool')
+  // 第 2 次重复的警告附在结果原文之后，会被「同目标去重」在后续轮次里换成「已省略」标记，
+  // 所以要在**全部请求**里找（旧用例同理），不能用最后一发。
+  const allToolMsgs = requests.flatMap((r) => (r.messages || []).filter((m) => m.role === 'tool'))
+  assert.ok(allToolMsgs.some((m) => m.content.includes('【注意】')), '第 2 次重复应附带警告')
+  // 拦截回的是短 JSON（不足折叠阈值），不会被去重，所以能在最后一发里逐条数出来
+  assert.equal(lastToolMsgs.filter((m) => m.content.includes('"blocked":true')).length, lastToolMsgs.length - 2)
+
+  // ③ 提醒各出现一次：进展提醒（warn）+ 收口指令（wrapup）
+  const warns = lastReq.messages.filter((m) => hasText(m, '【进展提醒】'))
+  const wrapups = lastReq.messages.filter((m) => hasText(m, '【收口指令】'))
+  assert.equal(warns.length, 1, `进展提醒应只注入一次，实际 ${warns.length}`)
+  assert.equal(wrapups.length, 1, `收口指令应只注入一次，实际 ${wrapups.length}`)
+  assert.match(warns[0].content, /没有取得任何新信息/)
+
+  assertLegalSequences(requests)
+
+  // ④ 兜底也救不回来（模型照样不给答案）→ 报 max_iterations，且文案说明是「无进展被收口」
   const done = ev.sent.filter((e) => e.ch === 'chat:done')
   assert.equal(done.length, 1)
   assert.equal(done[0].payload.endReason, 'max_iterations')
-  assert.match(done[0].payload.endDetail, /60 轮/)
+  assert.match(done[0].payload.endDetail, /无进展/)
+  assert.doesNotMatch(done[0].payload.endDetail, /60 轮/, '不该再提旧的 60 轮硬上限')
 
-  // ⑥ 兜底请求确实发出过（不带 tools 的那一发）
-  assert.ok(requests.some((r) => !r.tools), '轮次耗尽后应发起一次不带工具的兜底请求')
+  // ⑤ 兜底请求确实发出过（不带 tools 的那一发）
+  assert.ok(requests.some((r) => !r.tools), '收口后应发起一次不带工具的兜底请求')
 })
 
 test('端到端：兜底那发成功时 → 不报 max_iterations，而是照常给出答案', async () => {
@@ -332,49 +374,15 @@ test('端到端：兜底那发成功时 → 不报 max_iterations，而是照常
 
   const done = ev.sent.filter((e) => e.ch === 'chat:done')
   assert.equal(done.length, 1)
-  assert.equal(done[0].payload.endReason, 'complete', '兜底成功就不该报「轮次已达上限」—— 用户看到那条报错说明兜底也挂了')
+  assert.equal(done[0].payload.endReason, 'complete', '兜底成功就不该报「未给出最终回答」—— 用户看到那条报错说明兜底也挂了')
   assert.match(done[0].payload.fullContent, /基于已有工具结果/)
   assert.ok(requests.some((r) => !r.tools), '兜底请求发出过')
 })
 
-test('端到端：模型正常收敛（第 3 轮给答案）→ endReason=complete，不触发轮次提醒', async () => {
+test('端到端：模型正常收敛（第 3 轮给答案）→ endReason=complete，不触发任何提醒', async () => {
   executed.length = 0
   const requests = []
-  currentFetch = async (_url, init) => {
-    const body = JSON.parse(init.body)
-    requests.push(body)
-    const n = requests.length
-    const parts = n < 3
-      ? [
-          sseLine({
-            choices: [{
-              delta: {
-                tool_calls: [{
-                  index: 0,
-                  id: `d${n}`,
-                  type: 'function',
-                  function: { name: 'read_file', arguments: `{"path":"C:/f${n}.js"}` }, // 参数不同 → 不是重复
-                }],
-              },
-            }],
-          }),
-          sseLine({ choices: [{ delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }),
-          'data: [DONE]\n\n',
-        ]
-      : [
-          sseLine({ choices: [{ delta: { content: '改好了。' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }),
-          'data: [DONE]\n\n',
-        ]
-    let i = 0
-    return {
-      ok: true,
-      body: {
-        getReader: () => ({
-          read: async () => (i < parts.length ? { done: false, value: enc.encode(parts[i++]) } : { done: true, value: undefined }),
-        }),
-      },
-    }
-  }
+  currentFetch = convergeAfterNFetch(requests, 2, '改好了。')
 
   stateStub.settings = { allowedDirs: [], role: 'dev', autoExecute: true, subAgentsEnabled: false }
   stateStub.chatRuns = new Map()
@@ -383,8 +391,9 @@ test('端到端：模型正常收敛（第 3 轮给答案）→ endReason=comple
   await chat.handleChatSend(ev, payload())
 
   assert.equal(executed.length, 2, '两个不同参数各执行一次')
-  const reqsWithWarn = requests.filter((r) => (r.messages || []).some((m) => typeof m.content === 'string' && m.content.startsWith('【轮次提醒】')))
-  assert.equal(reqsWithWarn.length, 0, '未接近上限时不该注入轮次提醒（不白花 token）')
+  const warned = (m) => hasText(m, '【进度提醒】') || hasText(m, '【进展提醒】') || hasText(m, '【收口指令】')
+  const reqsWithWarn = requests.filter((r) => (r.messages || []).some(warned))
+  assert.equal(reqsWithWarn.length, 0, '未接近软预算点、也没停滞时不该注入任何提醒（不白花 token）')
 
   const done = ev.sent.filter((e) => e.ch === 'chat:done')
   assert.equal(done.length, 1)

@@ -94,6 +94,11 @@ export default defineConfig({
     // 构建结束（含 electron 各入口）后复制新增源码模块到 dist-electron/
     {
       name: 'copy-electron-modules',
+      // dev（vite dev server）不会触发 closeBundle，须在 server 启动时也复制一次：
+      // dist-electron/ 不受版本控制，全新 clone 首次 dev 时若缺 state.js 等模块会启动失败。
+      configureServer() {
+        copyElectronModules()
+      },
       closeBundle() {
         copyElectronModules()
       },

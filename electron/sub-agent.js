@@ -33,10 +33,9 @@ function callTool(tc, ctx) {
 
 const { getActiveProfile } = settings
 
-const SUB_AGENT_MAX_ROUNDS = 30
-// 整个子代理循环的**墙钟上限**（不是单次工具、也不是单轮 API）。
-// 2026-09-21 由 5 分钟上调到 10 分钟：5 分钟在大仓库检索类任务上必然撞线，
-// 而且撞线后原来会把已完成的成果整段丢弃、主 Agent 白等一轮。
+// 子代理的工具循环**没有步数上限**（2026-10-05）：改由墙钟超时（下方 SUB_AGENT_TIMEOUT_MS）
+// 与「进展停滞收口」（loopPolicy）双保险。原来的 30 轮硬上限会把「读得慢但一直在推进」
+// 的检索任务平白掐断，而又没有超时那样的部分成果兜底语义。
 const SUB_AGENT_TIMEOUT_MS = 10 * 60 * 1000 // 10 分钟
 
 // 子 Agent 不可用的工具（名字表见 tools/subagent-policy.js，与执行层的拒绝名单同一份）：
@@ -50,6 +49,11 @@ const SUB_AGENT_TIMEOUT_MS = 10 * 60 * 1000 // 10 分钟
 //     dev 角色下 fs-safe 的 isPathAllowed 直接放行，等于"无确认框、无守卫、无记录的任意写盘"。
 //   过滤只是第一道；tools/index.js 里另有 ctx.subAgent 硬拒绝兜底（含 execute_command 只读白名单）。
 const BLOCKED_TOOLS = subagentPolicy.BLOCKED_TOOLS
+
+// 工具循环的收口策略：与主 Agent 共用同一套「无步数上限、按进展收口」的判据。
+// 子代理额外有 10 分钟墙钟上限（见 SUB_AGENT_TIMEOUT_MS），但**没有步数上限** ——
+// 收口只发生在「连续多轮没拿到新信息」时（子代理是只读检索角色，原地打转是典型失败形态）。
+const loopPolicy = require('./tool-loop-policy')
 
 /**
  *  从工具结果里拼一段「已完成工作摘要」。两个用途：
@@ -151,11 +155,24 @@ function runSubAgentLoop({ subAgentId, task, description, convId, sender, parent
   ]
   let fullContent = ''
   let rounds = 0
+  // 收口状态（无步数上限 · 按进展收口）：见 electron/tool-loop-policy.js
+  const loopState = loopPolicy.newState()
 
   const promise = (async () => {
     try {
-      for (let loop = 0; loop < SUB_AGENT_MAX_ROUNDS; loop++) {
+      for (let loop = 0; ; loop++) {
         if (controller.signal.aborted) break
+        // 绝对刹车：防死循环的保险丝，正常任务碰不到（子代理另有 10 分钟墙钟上限）
+        if (loop >= loopPolicy.ABSOLUTE_STEP_CEILING) {
+          console.warn(`[sub-agent] 触达绝对刹车 ${loopPolicy.ABSOLUTE_STEP_CEILING} 轮，强制结束工具循环`)
+          break
+        }
+        // 收口：连续多轮没拿到新信息 → 直接跳出，让下方把已有成果作为结论返回
+        const decision = loopPolicy.decideRound(loopState, { loop })
+        if (decision.action === 'stop') {
+          console.warn(`[sub-agent] 收口：连续 ${loopState.stall} 轮未取得新信息，停止工具循环`)
+          break
+        }
         rounds = loop + 1
 
         const response = await fetchWithRetry(`${baseUrl}/chat/completions`, {
@@ -300,6 +317,12 @@ function runSubAgentLoop({ subAgentId, task, description, convId, sender, parent
             content: result,
           })
         }
+
+        // 收口中间件：本轮有「此前没用过的 (工具名, 参数)」才算有进展。
+        // 子代理是只读检索角色，原地打转（反复扫同一处）是它的典型失败形态。
+        loopPolicy.noteRound(loopState, {
+          calls: toolCalls.map((tc) => ({ name: tc.function.name, args: tc.function.arguments })),
+        })
       }
 
       const duration = ((Date.now() - startTime) / 1000).toFixed(1)

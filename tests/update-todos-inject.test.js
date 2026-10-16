@@ -3,10 +3,10 @@
 // 单测 tests/update-todos.test.js 锁的是纯逻辑；这里锁的是**接线**，也就是这个功能真正起作用的那一步：
 //   1) 有清单时，每一条发给模型请求的末尾都要带【任务清单】段（不是只第一轮）
 //   2) 清单为空时一条都不发（零开销 —— 不能白占每轮 prefill）
-//   3) 注入**不能造出连续两条 user 消息**（原代码从不在工具消息前插 user，轮次提醒最早第 40 轮才触发；
+//   3) 注入**不能造出连续两条 user 消息**（原代码从不在工具消息前插 user，收口/软预算提醒最早第 20 轮才触发；
 //      任务清单每轮都注入，是本机制新引入的风险）
 //   4) 注入后消息序列仍然合法：assistant(tool_calls) 后必须紧跟等量 tool 消息（否则接口 400）
-//   5) 轮次提醒与任务清单合并进同一条消息，不是两条
+//   5) 收口/进度提醒与任务清单合并进同一条消息，不是两条
 //   6) 工具下发正确：只有 dev 角色拿得到 update_todos
 //
 // chat.js 是 CJS 且加载即 require('electron')，故先把依赖塞进 require.cache。
@@ -273,29 +273,29 @@ test('注入后消息序列仍合法，且全程不出现连续两条 user 消�
   }
 })
 
-test('第 40 轮的轮次提醒与任务清单合并成同一条消息，而不是两条', async () => {
+test('第 20 轮的进度提醒与任务清单合并成同一条消息，而不是两条', async () => {
   resetState('dev')
   todo.updateTodos(CONV, [{ text: 'B', status: 'in_progress' }])
 
   const requests = []
-  // 45 轮工具调用 —— 足以跨过 BUDGET_WARN_FROM(40)
-  currentFetch = makeFetch(requests, 45)
+  // 25 轮工具调用 —— 足以跨过软预算提醒点（第 20 轮）
+  currentFetch = makeFetch(requests, 25)
   await chat.handleChatSend(event(), payloadKeepTodos())
 
   const withTools = requests.filter((r) => r.tools)
   const has = (m, s) => m && typeof m.content === 'string' && m.content.includes(s)
-  // 「本轮新注入了轮次提醒」的判据 = 末尾那条带【轮次提醒】（注入永远在末尾）
-  const fresh = withTools.filter((r) => has(r.messages[r.messages.length - 1], '【轮次提醒】'))
-  assert.ok(fresh.length >= 1, '应至少注入过一次轮次提醒')
+  // 「本轮新注入了进度提醒」的判据 = 末尾那条带【进度提醒】（注入永远在末尾）
+  const fresh = withTools.filter((r) => has(r.messages[r.messages.length - 1], '【进度提醒】'))
+  assert.ok(fresh.length >= 1, '应至少注入过一次进度提醒')
 
   for (const r of fresh) {
     const tail = r.messages[r.messages.length - 1]
     assert.ok(has(tail, '【任务清单】'), '两个提醒必须合并进同一条消息 —— 分开推就是连续两条 user')
   }
-  // 第一次注入（第 40 轮）时全请求里只该有 1 条轮次提醒
+  // 第一次注入（第 20 轮）时全请求里只该有 1 条进度提醒
   const first = fresh[0]
-  const count = (first.messages || []).filter((m) => has(m, '【轮次提醒】')).length
-  assert.equal(count, 1, `第 40 轮首次注入时不应出现多条轮次提醒（实际 ${count}）`)
+  const count = (first.messages || []).filter((m) => has(m, '【进度提醒】')).length
+  assert.equal(count, 1, `第 20 轮首次注入时不应出现多条进度提醒（实际 ${count}）`)
 })
 
 test('工具下发：全角色都能拿到 update_todos；开源版不做工具收窄', async () => {
@@ -390,7 +390,7 @@ test('清空发生在模型循环之前：新任务的所有请求里都不得�
 //  起因：纪律写在系统提示词的【任务清单】公共段里，但弱模型/转发网关会整段忽略它 ——
 //  用户真实会话台账（userData/conversations/<id>.activity.json）里 48 次工具调用、update_todos 0 次，
 //  界面上的任务清单面板始终不出现，用户反馈「任务清单改没了」。
-//  这里把纪律挪到**请求末尾**再说一遍，与轮次预算提醒同一机制。
+//  这里把纪律挪到**请求末尾**再说一遍，与收口/进度提醒同一机制。
 // ============================================================
 const planNudges = (req) =>
   (req.messages || []).filter((m) => typeof m.content === 'string' && m.content.includes('还没有列任务清单'))

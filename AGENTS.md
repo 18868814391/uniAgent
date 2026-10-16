@@ -87,12 +87,15 @@ C:/Users/syf/.workbuddy/binaries/node/versions/22.22.2-3/node.exe --check <文�
   ② 折叠只作用于**发给 API 的请求体**，续跑快照落盘前要用 `restoreToolResults` 还原原文。
 - 改这块之前先跑 `tests/tool-result-window.test.js`。
 
-## 工具循环的轮次预算与重复调用检测（`chat.js`）
+## 工具循环的收口与重复调用检测（`chat.js` + `tool-loop-policy.js`）
 
-- `TOOL_LOOP_LIMIT = 60`（一轮 = 一次 LLM 往返）；轮次耗尽后**强制再发一次不带工具**的请求逼它回答。
-- 轮次预算提醒：第 40/45/50/55 轮各注入一条 `【轮次提醒】` user 消息（位置在所有 `tool` 消息之后）。
+- **没有轮数硬上限**：`for (;;)`；收口只依据「进展」——连续多轮没拿到新信息（本轮调用的
+  `(工具名, 参数)` 以前全用过、清单也没变）才逐级升级 `warn(2)` → `wrapup(3)` → `stop(4)`，
+  `stop` 时跳出循环交给「不带工具的兜底请求」；另有 `ABSOLUTE_STEP_CEILING = 400` 的绝对刹车。
+- 软预算提醒：第 20/35/50… 轮注入一条 `【进度提醒】` user 消息，**只报已用轮数、不提上限**。
+  注入位置在所有 `tool` 消息之后，不能插进 `assistant(tool_calls) → tool*` 中间（否则接口 400）。
 - 重复调用检测：同一 `(工具名, 参数)` 连续第 2 次照常执行但附警告，第 3 次起直接拦下。
-- 改动前跑 `tests/tool-loop-budget.test.js`。
+- 改动前跑 `tests/tool-loop-policy.test.js` 与 `tests/tool-loop-budget.test.js`。
 
 ## 测试
 

@@ -18,6 +18,9 @@ const { abortSubAgentsForConversation } = require('./sub-agent')
 const { newRunWorkDir, scheduleCleanup, pruneRootLeftovers } = require('./xl-work')
 const orphanCleanup = require('./tools/orphan-cleanup')
 const turnSnapshot = require('./turn-snapshot')
+// 工具循环的收口策略（无最大步数 · 按进展收口）：纯函数状态机，与子代理共用。
+// 阈值/文案/判据都在 electron/tool-loop-policy.js，本文件只负责调用与注入。
+const loopPolicy = require('./tool-loop-policy')
 // 网络健康：本轮真实失败时上报给右上角状态点（见 noteChatNetworkFailure 的注释）
 const netHealth = require('./net-health')
 const toolActivity = require('./tool-activity')
@@ -125,41 +128,23 @@ function otherKeepForContext(contextWindow) {
 }
 
 // ============================================================
-//  工具循环的轮次预算与重复调用检测（2026-09-29）
+//  工具循环收口：**没有最大步数**，按进展收口（2026-10-05 重构）
 //
-//  症状：改代码时「卡住」，最后报「AI 工具调用轮次已达上限 / 已连续调用 60 轮工具」。
-//  根因不是卡死，是模型**不知道轮次有上限**：它每轮都返回工具调用做探索性检索，
-//  直到 loop 跑满 60 次才被强制截断；此时再走兜底请求往往也已经晚了（上下文攒了
-//  60 轮工具历史，兜底的非流式请求容易超窗口/返回空 → 用户看到的还是这条报错）。
+//  旧实现是「60 轮硬上限 + 跑满后兜底逼答」，再靠第 40/45/50/55 轮的提醒替上限擦屁股。
+//  问题：步数与「有没有干成事」无关 —— 长任务被平白截断，而模型只能抢在提醒点之前收敛。
 //
-//  两个对策（都在本文件内，不改工具本身）：
-//   ① 轮次预算提醒：剩余轮数不多时明确告诉模型「还剩几轮，立即收敛」。
-//   ② 重复调用检测：同一 (工具名, 参数) 连续重复时，第 2 次附警告、第 3 次直接拦下不执行
-//      —— 相同输入不会产生不同结果，重复执行只是白烧一轮。
+//  现在工具循环是 `for(;;)`，**内核不设最大步数**，只在两种情况下收口：
+//   ① **进展停滞**：连续多轮没拿到任何新信息（本轮调用的 (工具名, 参数) 组合以前全都用过，
+//      且任务清单也没变化）→ warn（提醒自查）→ wrapup（要求停止工具、立即作答）
+//      → stop（跳出循环，交给下方「不带工具的兜底请求」逼出最终回答）；
+//   ② **绝对刹车**（ABSOLUTE_STEP_CEILING）：防死循环的保险丝，不是预算，正常任务碰不到。
+//  软预算提醒（第 20/35/50… 轮）只报「已用多少轮」请模型自查工作量，**不附带任何上限**。
+//
+//  判据、文案、状态机都在 electron/tool-loop-policy.js（纯函数，与子代理共用同一套）。
+//  本文件只负责：decideRound → 注入提醒 / 跳出循环 / 走兜底。
+//  回归测试：tests/tool-loop-policy.test.js + tests/tool-loop-budget.test.js。
 // ============================================================
-const TOOL_LOOP_LIMIT = 60      // 工具循环最大轮数（一轮 = 一次 LLM 往返，可含多个工具调用）
-const BUDGET_WARN_FROM = 40     // 从第 40 轮起开始提醒
-const BUDGET_WARN_EVERY = 5     // 之后每 5 轮再提醒一次
-
-/**
- * 判断本轮循环是否该注入轮次预算提醒。
- * 只在剩余不足时提醒，且间隔 BUDGET_WARN_EVERY 轮，避免每轮都塞、白花 token。
- */
-function shouldWarnBudget(loop, limit = TOOL_LOOP_LIMIT, from = BUDGET_WARN_FROM, every = BUDGET_WARN_EVERY) {
-  if (!Number.isFinite(loop) || loop < from) return false
-  return (loop - from) % Math.max(1, every) === 0
-}
-
-/**
- * 生成轮次预算提醒文案（注入为一条 user 消息，逼模型收敛）。
- * 位置在所有 tool 消息之后，符合「assistant(tool_calls) → tool*」的消息序列约束。
- */
-function budgetWarnText(loop, limit = TOOL_LOOP_LIMIT) {
-  const left = Math.max(0, limit - loop)
-  return `【轮次提醒】你已用掉 ${loop}/${limit} 轮工具调用，剩余约 ${left} 轮。` +
-    '请立即收敛：停止探索性检索，基于已获得的信息直接完成核心改动并给出最终回答。' +
-    '确实做不完就明确说明「已完成什么 / 还差什么」，不要把同一件事反复重试。'
-}
+//  （重复调用检测「第 2 次附警告、第 3 次拦下」不变，见下方 trackRepeatCall 段）
 
 // 跑到第几轮工具还没有任务清单 → 提醒一次（见下面 planNudgeText 的注释）。
 const PLAN_NUDGE_FROM = 3
@@ -627,7 +612,7 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
   let totalToolCalls = 0          // 本轮对话累计工具调用次数
   let lastFinishReason = null     // 上一次 API 响应的 finish_reason
   let hasRealAnswer = false       // 是否已产生"真正的最终回答"（模型以 stop 结束且无工具调用）
-  let brokeEarly = false          // 工具循环是否通过 break 正常结束（false = 触达轮次上限被强制截断）
+  let brokeEarly = false          // 工具循环是否通过 break 结束（false = 触达绝对刹车，属异常长跑）
   let endReason = 'complete'      // 本轮结束原因：complete / timeout / max_iterations / no_answer / error
   let endDetail = ''              // 结束原因的补充说明（用于前端提示用户）
   let askPending = false          // 是否正挂起等待用户回答 ask_user
@@ -660,6 +645,8 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
   let textToolCallDetected = false   // 本轮正文里出现文本形态工具调用、且**还原失败**（网关不支持原生 function calling）
   let textToolCallRepairs = 0        // 已触发还原的轮次数（上限 MAX_TEXT_TOOL_CALL_REPAIRS）
   let textToolCallRepaired = 0       // 累计还原并真正执行的调用数（收尾时汇报给用户）
+  // 工具循环的收口状态（政策模块持有）：见 electron/tool-loop-policy.js
+  const loopState = loopPolicy.newState()
 
   // ---- 断点续跑：本次请求 history 的指纹 + 本轮 currentMessages 的起始下标 ----
   // currentMessages 要等上下文压缩之后才组装，而 endAbortedTurn 可能在压缩期就被调用，
@@ -924,12 +911,19 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
   }, 5000)
 
   try {
-    // Tool calling loop — max TOOL_LOOP_LIMIT iterations to prevent infinite loops
-    for (let loop = 0; loop < TOOL_LOOP_LIMIT; loop++) {
+    // Tool calling loop —— **内核没有最大步数**（2026-10-05 重构）。
+    // 收口只由两件事触发：① 收口中间件（loopPolicy）判定「进展停滞」；② 绝对刹车
+    // ABSOLUTE_STEP_CEILING（防死循环的保险丝，正常任务碰不到，见 tool-loop-policy.js）。
+    // 循环的常规退出路径仍是「模型返回不带工具调用的回答」。
+    for (let loop = 0; ; loop++) {
+      if (loop >= loopPolicy.ABSOLUTE_STEP_CEILING) {
+        console.warn(`[chat] 触达绝对刹车 ${loopPolicy.ABSOLUTE_STEP_CEILING} 轮，强制结束工具循环`)
+        break
+      }
       lastActivity = Date.now()   // 新一轮请求开始前刷新：工具执行时间不计入"空闲"
-      // 本轮附加提醒（轮次预算 + 任务清单），**合并成一条消息**推送：
-      //  - 轮次预算：模型并不知道 loop 有上限，会一路检索到被强制截断 —— 用户看到的就是
-      //    「已连续调用 60 轮工具，仍未给出最终回答」。剩余不多时明确告知，逼它收敛。
+      // 本轮附加提醒（收口提醒 + 任务清单），**合并成一条消息**推送：
+      //  - 收口提醒（loopPolicy.decideRound）：无步数上限，只在「连续多轮没拿到新信息」时
+      //    逐级升级（warn 自查 → wrapup 要求作答）；软预算点（20/35/50…）也只报已用轮数。
       //  - 任务清单（update_todos）：把模型自己写的清单在每轮回显一次，它就看得见
       //    「还剩几项没做」，不会跑着跑着漂到清单外的探索性检索上。清单为空则整段跳过。
       // 位置必须在所有 tool 消息之后，符合「assistant(tool_calls) → tool*」的序列约束；
@@ -941,9 +935,15 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
       //    渲染层传来的 messages 是同一批引用，就地改会污染 turnInputHash 的输入。
       // 追加在**末尾**而非改写 system：上轮整段请求恰好是本周的前缀，前缀缓存友好。
       const reminders = []
-      if (shouldWarnBudget(loop)) {
-        reminders.push(budgetWarnText(loop))
-        console.log(`[chat] 轮次预算提醒：第 ${loop}/${TOOL_LOOP_LIMIT} 轮，已提示模型收敛`)
+      // 收口中间件：无步数上限，只看「有没有进展」。stop = 不再发请求、直接跳出工具循环。
+      const decision = loopPolicy.decideRound(loopState, { loop })
+      if (decision.action === 'stop') {
+        console.log(`[chat] 收口：连续 ${loopState.stall} 轮未取得新信息，停止工具循环（第 ${loop} 轮）`)
+        break
+      }
+      if (decision.text) {
+        reminders.push(decision.text)
+        console.log(`[chat] 收口提醒（${decision.action}）：第 ${loop} 轮`)
       }
       const todoSection = todo.renderTodoSection(conversationId)
       if (todoSection) {
@@ -1513,6 +1513,15 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
         return
       }
 
+      // 收口中间件：记下本轮产出，更新「连续多少轮没拿到新信息」的计数。
+      // 判据只用 (工具名, 参数) 是否首次出现 + 任务清单有没有变 —— 正常的长任务 stall 恒为 0，
+      // 只有真在原地打转才会逐级升级到 stop（见 electron/tool-loop-policy.js）。
+      // 被重复调用拦下的调用本来就在 seen 里，天然计为「无进展」。
+      loopPolicy.noteRound(loopState, {
+        calls: steps.map((s) => ({ name: s.name, args: s.tc.function.arguments })),
+        todoSignature: todo.renderTodoSection(conversationId),
+      })
+
       lastActivity = Date.now()   // 工具执行完刷新：执行时间不计入"空闲"判定
 
       // If the finish reason was 'stop' (not tool_calls), we're done
@@ -1582,7 +1591,7 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
       }
     }
 
-    // 汇总本轮结束原因，明确告诉前端：正常完成 / 连接超时 / 工具未执行 / 轮次截断 / 无回答
+    // 汇总本轮结束原因，明确告诉前端：正常完成 / 连接超时 / 工具未执行 / 长跑未收口 / 无回答
     if (hasRealAnswer && !textToolCallDetected) {
       endReason = 'complete'
     } else if (abortedBy || controller.signal.aborted) {
@@ -1593,9 +1602,11 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
       endReason = 'text_tool_call'
       endDetail = '模型把工具调用写成了正文（当前网关/模型未走原生 function calling），本轮工具没有真正执行。可点击“重试”，或在设置里换用支持原生 function calling 的模型。'
     } else if (loopExhausted) {
+      // 只有触达绝对刹车（ABSOLUTE_STEP_CEILING）才会走到这里 —— 内核本身没有步数上限，
+      // 停滞收口（stop）也走同一分支：兜底请求仍没逼出回答。
       endReason = 'max_iterations'
-      endDetail = `AI 已连续调用 ${TOOL_LOOP_LIMIT} 轮工具，仍未给出最终回答。` +
-        '常见原因是模型在反复做同一件检索（可查看日志里的「重复调用已拦截」）。' +
+      endDetail = `AI 连续调用工具超过 ${loopPolicy.ABSOLUTE_STEP_CEILING} 轮（或多次无进展被强制收口），仍未给出最终回答。` +
+        '常见原因是模型卡在同一个死循环里（可查看日志里的「重复调用已拦截」与「收口」记录）。' +
         '建议把任务拆小后重发，或点「继续」让它接着做。'
     } else if (totalToolCalls > 0) {
       endReason = 'no_answer'
@@ -1723,13 +1734,13 @@ module.exports = {
   mapToolCalls,
   // 缓存命中 token 提取（供测试与前端展示复用）
   cachedTokensOf,
-  // 轮次预算与重复调用检测：同样导出纯函数供测试直接断言
-  TOOL_LOOP_LIMIT,
-  shouldWarnBudget,
-  budgetWarnText,
+  // 工具循环收口 + 重复调用检测：导出纯函数供测试直接断言。
+  // 收口阈值/文案/判据都在 electron/tool-loop-policy.js（无步数上限、按进展收口），
+  // 这里只透出一份引用，避免测试再从 chat.js 里抄一份常量。
+  loopPolicy,
   PLAN_NUDGE_FROM,
   planNudgeText,
   trackRepeatCall,
   repeatWarnText,
   repeatBlockText,
-}
+}

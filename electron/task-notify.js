@@ -44,7 +44,7 @@ const FAILED_REASONS = ['timeout', 'error', 'max_iterations', 'no_answer', 'text
 const FAILED_LABELS = {
   timeout: '连接超时，任务中断',
   error: '执行出错，任务未完成',
-  max_iterations: '达到工具轮次上限，任务未完成',
+  max_iterations: '多次无进展被收口，任务未完成',
   no_answer: '未生成回答',
   text_tool_call: '工具调用未执行（当前网关不支持原生 function calling）',
 }

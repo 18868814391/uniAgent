@@ -31,7 +31,7 @@ yarn test           # node:test 单测
 ## 功能特性
 
 - **流式对话**：任意 OpenAI 兼容接口，逐字渲染；转发模型思考过程。
-- **工具调用**：完整 Function Calling 支持，工具循环最多 60 轮，一轮内多个工具并发执行，结果按序回填。
+- **工具调用**：完整 Function Calling 支持，工具循环不设轮数硬上限（按「进展」收口），一轮内多个工具并发执行，结果按序回填。
 - **文件操作**：`read_file` / `write_file` / `edit_file`（str_replace 精准编辑 + unified diff 回显）/ `list_directory` / `delete_file`，
   受**授权目录白名单**约束。
 - **代码检索**：`grep_code`（正则/关键词，带时间预算与异步 IO）/ `glob_files`（按文件名定位）。
@@ -108,7 +108,8 @@ electron/
   main.js            主进程装配（生命周期 + 各域 IPC 注册 + 自动更新）
   state.js           全局共享可变状态（settings / 会话运行槽 / 任务清单 …）
   settings.js        配置持久化 / 目录解析 / 模型 profile / 系统提示词拼装
-  chat.js            LLM + 工具调用循环（并发执行、工具结果折叠、轮次预算、重复调用检测）
+  chat.js            LLM + 工具调用循环（并发执行、工具结果折叠、按进展收口、重复调用检测）
+  tool-loop-policy.js 工具循环收口策略（无步数上限；停滞升级 warn→wrapup→stop）
   sub-agent.js       子代理独立循环
   context.js         上下文压缩 / token 估算
   conversations.js   会话存储 / 归档导出

@@ -664,7 +664,7 @@ export const useAppStore = defineStore('app', () => {
   function buildTurnIssue(endReason, detail) {
     const reasons = {
       timeout: '网络连接超时：超过 180 秒没有收到 AI 的数据，连接可能已断开',
-      max_iterations: 'AI 工具调用轮次已达上限，尚未给出最终回答',
+      max_iterations: 'AI 长时间调用工具仍未给出最终回答（多次无进展被强制收口）',
       no_answer: 'AI 本轮未生成有效回答',
       // 网关不支持原生 function calling：工具调用被写进正文，工具实际一次都没执行
       text_tool_call: '模型把工具调用写成了正文，本轮工具没有执行',
