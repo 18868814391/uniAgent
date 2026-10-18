@@ -204,8 +204,24 @@
     </div>
     <!-- END messages-area -->
 
-    <!-- Web Search Toggle + Input Area -->
-    <div class="input-area">
+    <!-- Web Search Toggle + Input Area（整块同时是图片拖拽的落点） -->
+    <div
+      class="input-area"
+      :class="{ 'drag-over': dragActive }"
+      @dragenter.prevent="onDragEnter"
+      @dragover.prevent
+      @dragleave.prevent="onDragLeave"
+      @drop.prevent="onDrop"
+    >
+      <!-- 拖拽提示：拖动图片经过输入区时覆盖一层，明确"这里能放" -->
+      <div v-if="dragActive" class="drop-hint">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="18" height="18" rx="2" />
+          <circle cx="8.5" cy="8.5" r="1.5" />
+          <path d="M21 15l-5-5L5 21" />
+        </svg>
+        <span>松开即可把图片加进来</span>
+      </div>
       <!-- AI 提问卡片（ask_user）：AI 反问/给选择框时弹出，回答后继续 -->
       <div v-if="store.askUser" class="ask-card">
         <div class="ask-card-header">
@@ -255,8 +271,18 @@
             </svg>
             <span>导入文件</span>
           </button>
-          <div v-if="store.attachedFiles.length > 0" class="file-chips">
-            <div v-for="f in store.attachedFiles" :key="f.path" class="file-chip" :title="f.path">
+          <!-- 图片附件用**缩略图**而不是文件名 chip：粘贴图落盘名长这样 pasted-1712345678901-0.png，
+               对人没有任何信息量，"是不是我要发的那张图"只能靠看图确认。 -->
+          <div v-if="imageAttachments.length > 0" class="image-chips">
+            <div v-for="f in imageAttachments" :key="f.path" class="image-chip" :title="f.name">
+              <img v-if="f.preview" class="image-chip-thumb" :src="f.preview" :alt="f.name" />
+              <span v-else class="image-chip-thumb image-chip-thumb-fallback">🖼</span>
+              <button class="image-chip-remove" @click="store.removeAttachedFile(f.path)" title="移除图片">✕</button>
+            </div>
+          </div>
+          <!-- 非图片附件：只记住路径，AI 需要时用 read_file 读 -->
+          <div v-if="fileAttachments.length > 0" class="file-chips">
+            <div v-for="f in fileAttachments" :key="f.path" class="file-chip" :title="f.path">
               <svg class="file-chip-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z" />
                 <polyline points="13 2 13 9 20 9" />
@@ -305,9 +331,10 @@
           ref="inputRef"
           v-model="inputText"
           class="chat-input"
-          placeholder="输入消息，按 Enter 发送，Shift+Enter 换行..."
+          placeholder="输入消息，可 Ctrl+V 粘贴或拖入图片，Enter 发送，Shift+Enter 换行..."
           rows="1"
           @keydown="handleKeydown"
+          @paste="onPaste"
           @input="autoResize"
           :disabled="store.isStreaming"
         />
@@ -381,8 +408,11 @@ const canScrollUp = ref(false)
 const canScrollDown = ref(false)
 const showScrollButtons = computed(() => canScrollUp.value || canScrollDown.value)
 
+// 可发送条件：有文字**或**有图片。图片粘贴是异步的（FileReader → 主进程落盘），
+// 落盘途中一律禁止发送 —— 否则用户粘完立刻回车，消息会在图片写盘前发出去、图白粘了。
 const canSend = computed(() => {
-  return inputText.value.trim() && !store.isStreaming
+  if (store.isStreaming || attachingImages.value > 0) return false
+  return !!(inputText.value.trim() || imageAttachments.value.length > 0)
 })
 
 // 仍在执行中的工具调用数 —— 只要有未完成的，汇总行就不能说"✓ 完成"
@@ -633,13 +663,19 @@ function handleKeydown(e) {
 }
 
 async function doSend() {
+  if (store.isStreaming || attachingImages.value > 0) return
   const text = inputText.value.trim()
-  if (!text || store.isStreaming) return
+  const hasImage = imageAttachments.value.length > 0
+  if (!text && !hasImage) return
+  // 「只发图」：正文得有个占位，不能送一条空 content —— 部分网关对空消息直接 400，
+  // 且会话标题取自首条用户消息，空的会变成空标题。
+  const payload = text || (hasImage ? '请查看这张图片。' : '')
+  if (!payload) return
   inputText.value = ''
   autoScroll = true
   await nextTick()
   autoResize() // 发送后把输入框高度重置回单行
-  await store.sendMessage(text)
+  await store.sendMessage(payload)
 }
 
 // 「继续」横幅里的可选补充说明（两条横幅共用一个 ref —— 它们由 store 保证互斥展示）。
@@ -713,6 +749,141 @@ async function pickFiles() {
   } catch (e) {
     console.error('Failed to select files:', e)
   }
+}
+
+// ============================================================
+//  图片输入：Ctrl+V 粘贴 / 拖拽进来 / 只发图
+//
+//  剪贴板与拖拽**都拿不到本地路径**，只能拿到 File 或 data URL；而主进程的视觉载荷入口
+//  （fs-safe.localImagePart）只认本地文件路径。所以这里只做「提取 + 转 data URL」，
+//  落盘成真实文件并授权由主进程的 attachments:savePastedImages 负责，
+//  落盘后并入同一个 store.attachedFiles —— 下游（sendMessage → chat.js → fs-safe）
+//  完全不需要区分"粘贴的"和"导入的"。
+// ============================================================
+// 与 fs-safe.IMAGE_MIME_BY_EXT 同口径：只有这几种扩展名才会被当成视觉载荷发出去。
+// 用 gif / bmp 的路径去当图片会失败（网关不收），所以这里也不把它们算作图片附件。
+const IMAGE_EXT_RE = /\.(jpe?g|png|webp)$/i
+// 单条消息的图片上限，与 fs-safe.MAX_IMAGES_PER_MESSAGE（=4）一致：
+// 超了 fs-safe.buildImageParts 会直接抛错、整轮对话失败，所以在这里就挡住。
+const MAX_ATTACH_IMAGES = 4
+
+const imageAttachments = computed(() => (store.attachedFiles || []).filter((f) => IMAGE_EXT_RE.test(f.path || '')))
+const fileAttachments = computed(() => (store.attachedFiles || []).filter((f) => !IMAGE_EXT_RE.test(f.path || '')))
+
+// 正在落盘的图片批次数（>0 时禁止发送，见 canSend）
+const attachingImages = ref(0)
+// 拖拽高亮。用计数器而不是布尔：拖动过程中 dragenter/dragleave 会在子元素之间反复触发，
+// 用布尔会让提示层疯狂闪烁。
+const dragActive = ref(false)
+let dragDepth = 0
+
+// File → data URL（读失败返回空串，由调用方过滤）
+function readAsDataUrl(file) {
+  return new Promise((resolve) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '')
+    reader.onerror = () => resolve('')
+    reader.readAsDataURL(file)
+  })
+}
+
+// 从 DataTransfer 里挑出图片文件（粘贴与拖拽共用）。
+// 两条来源都试：items（粘贴的截图、从浏览器拖来的图）优先，files（从资源管理器拖文件）兜底。
+function pickImageFiles(dt) {
+  const out = []
+  const seen = new Set()
+  const push = (f) => {
+    if (!f || !String(f.type || '').startsWith('image/')) return
+    const key = `${f.name}|${f.size}|${f.lastModified}`
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push(f)
+  }
+  if (dt && dt.items && dt.items.length) {
+    for (const it of dt.items) {
+      if (it.kind === 'file') push(it.getAsFile())
+    }
+  }
+  if (out.length === 0 && dt && dt.files && dt.files.length) {
+    for (const f of dt.files) push(f)
+  }
+  return out
+}
+
+// 剪贴板粘贴：**只有确实含图片时才 preventDefault**。
+// 否则粘贴纯文本也会被吞掉（用户复制一段代码想粘进输入框，结果什么都没发生）。
+function onPaste(e) {
+  const dt = e.clipboardData
+  const files = pickImageFiles(dt)
+  if (files.length === 0) return
+  e.preventDefault()
+  addImageFiles(files)
+}
+
+function onDragEnter() {
+  dragDepth += 1
+  dragActive.value = true
+}
+
+function onDragLeave() {
+  dragDepth = Math.max(0, dragDepth - 1)
+  if (dragDepth === 0) dragActive.value = false
+}
+
+function onDrop(e) {
+  dragDepth = 0
+  dragActive.value = false
+  const dt = e && e.dataTransfer
+  const files = pickImageFiles(dt)
+  if (files.length > 0) {
+    addImageFiles(files)
+    return
+  }
+  // 拖了东西但不是图片：明确指路，比"拖进来没反应"好
+  if (dt && dt.files && dt.files.length > 0) {
+    store.showNotice('只支持拖入图片；其它文件请点「导入文件」', 'info')
+  }
+}
+
+// 一批图片文件 → data URL → 交给主进程落盘 → 并入 attachedFiles
+async function addImageFiles(files) {
+  if (!files || files.length === 0) return
+  const room = Math.max(0, MAX_ATTACH_IMAGES - (store.attachedFiles || []).length)
+  let list = files
+  if (list.length > room) {
+    if (room === 0) {
+      store.showNotice(`一条消息最多带 ${MAX_ATTACH_IMAGES} 张图片`, 'error')
+      return
+    }
+    store.showNotice(`一条消息最多带 ${MAX_ATTACH_IMAGES} 张图片，已忽略多余的 ${list.length - room} 张`, 'info')
+    list = list.slice(0, room)
+  }
+  attachingImages.value += 1
+  try {
+    const dataUrls = []
+    for (const f of list) {
+      const url = await readAsDataUrl(f)
+      if (url) dataUrls.push(url)
+    }
+    if (dataUrls.length === 0) {
+      store.showNotice('图片读取失败', 'error')
+      return
+    }
+    const added = await store.attachImages(dataUrls)
+    if (added.length > 0) maybeWarnVisionOff(added.length)
+  } finally {
+    attachingImages.value -= 1
+  }
+}
+
+// 当前配置没勾「该模型支持读图」时的提醒。
+// 注意这条**不阻断发送** —— 用户附件里的图片总会作为 image_url part 发出去，
+// 纯文本模型的服务端会直接 400（应用会把这类 400 翻译成"该模型不支持图片"）。
+// 提前说一声，用户就知道该去设置里勾选或换模型，而不是对着报错猜。
+function maybeWarnVisionOff(count) {
+  const p = store.activeProfile
+  if (p && p.vision === true) return
+  store.showNotice(`已添加 ${count} 张图片，但当前配置未勾选「该模型支持读图」，发送后可能报错`, 'error', 6000)
 }
 
 function quickSend(text) {
@@ -1687,6 +1858,101 @@ onUnmounted(() => {
   color: white;
 }
 
+/* ---------- 图片附件缩略图（粘贴 / 拖拽进来的图） ----------
+   为什么不是文件名 chip：粘贴图落盘名是 pasted-1712345678901-0.png，对人零信息量，
+   只有缩略图才能让用户确认"发的是不是这张"。 */
+.image-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  min-width: 0;
+  padding: 1px 0;
+}
+
+.image-chip {
+  position: relative;
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  overflow: visible;
+  animation: fadeIn 0.2s ease;
+}
+
+.image-chip-thumb {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: calc(var(--radius-sm) - 1px);
+}
+
+/* 兜底：正常情况下主进程会为所有图片附件（粘贴 / 拖拽 / 导入）生成缩略图
+   （见 store.hydrateThumbnails），拿不到时才落到这里 —— 给个占位图标而不是留个空洞。 */
+.image-chip-thumb-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: calc(16px * var(--font-scale));
+  color: var(--text-muted);
+}
+
+.image-chip-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  font-size: calc(10px * var(--font-scale));
+  line-height: 1;
+  transition: all 0.2s;
+}
+
+.image-chip-remove:hover {
+  background: var(--danger);
+  color: white;
+}
+
+/* ---------- 拖拽落点 ----------
+   拖动图片经过输入区时整块高亮 + 覆盖一层提示。没有它，用户不知道"能不能拖进来"。 */
+.input-area.drag-over {
+  border-radius: var(--radius-sm);
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.drop-hint {
+  position: absolute;
+  left: 20px;
+  right: 20px;
+  top: 0;
+  bottom: 12px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px dashed var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft, rgba(127, 127, 127, 0.12));
+  color: var(--accent);
+  font-size: calc(13px * var(--font-scale));
+  pointer-events: none; /* 关键：不能吃掉 drop 事件，否则 onDrop 永远收不到 */
+}
+
 .search-toggle-btn {
   display: inline-flex;
   align-items: center;
@@ -1728,6 +1994,7 @@ onUnmounted(() => {
 
 /* Input Area */
 .input-area {
+  position: relative; /* .drop-hint 的定位父级 —— 缺了它会相对整个聊天容器铺满消息区 */
   padding: 12px 20px 20px;
   flex-shrink: 0;
 }

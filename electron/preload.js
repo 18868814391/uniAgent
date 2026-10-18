@@ -45,6 +45,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   attachFiles: (paths) => ipcRenderer.invoke('attachments:register', paths),
   detachFile: (path) => ipcRenderer.invoke('attachments:unregister', path),
   clearAttachments: () => ipcRenderer.invoke('attachments:clear'),
+  // 粘贴/拖拽的图片：渲染层只有 data URL（剪贴板与拖拽都拿不到本地路径），
+  // 交给主进程落盘成真实文件并授予读取权限，返回 [{ path, name, index }]
+  savePastedImages: (convId, dataUrls) => ipcRenderer.invoke('attachments:savePastedImages', convId, dataUrls),
+  // 图片附件缩略图：主进程按已授权路径从文件生成 96px 宽的 PNG data URL，
+  // 返回 { thumbs: { [path]: dataUrl } }（导入 / 粘贴 / 拖拽三种入口共用）
+  imageThumbnails: (paths) => ipcRenderer.invoke('attachments:thumbnails', paths),
 
   // ========== External ==========
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),

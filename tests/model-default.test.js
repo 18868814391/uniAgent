@@ -108,6 +108,16 @@ test('模型名缺失时回退到默认 id', () => {
   assert.equal(out.find((p) => p.id === 'profile-empty').model, 'deepseek-flash')
 })
 
+// 2026-10：读图（多模态）默认值由 false 改为 true —— 主流模型都支持图片输入，
+// 不该让用户先去设置页手动勾选。这里锁住"内置配置缺省即多模态"这一不变量。
+test('内置 DeepSeek 配置默认支持读图（多模态）', () => {
+  assert.equal(settings.DEFAULT_DEEPSEEK_PROFILE.vision, true)
+  // 无 modelProfiles 的老装机 / 全新安装，补出的内置配置也应是多模态
+  const out = settings.normalizeProfiles(undefined, {})
+  const builtin = out.find((p) => p.id === 'deepseek-default')
+  assert.equal(builtin.vision, true)
+})
+
 test('源码里不再残留旧默认 id 的硬编码（迁移表与注释除外）', () => {
   const src = fs.readFileSync(SETTINGS, 'utf-8')
   const hits = src

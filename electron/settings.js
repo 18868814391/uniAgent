@@ -40,9 +40,10 @@ const DEFAULT_DEEPSEEK_PROFILE = {
   contextWindow: 1024 * 1024,
   builtin: true,
   trial: false,
-  // 是否支持读图（多模态）。默认关：DeepSeek 系文本模型收到 image_url part 会直接 400，
-  // 宁可不发，也不要让用户遇到"这轮突然报错"。
-  vision: false,
+  // 是否支持读图（多模态）。默认开：主流模型（含默认网关）现已普遍支持图片输入，
+  // 让用户开箱即用，不必先去设置页勾选。若用的是纯文本模型，用户需自行取消勾选
+  // （收到 image_url part 的服务端会 400，应用会把它翻译成"该模型不支持图片"）。
+  vision: true,
 }
 
 // ============================================================
@@ -226,7 +227,8 @@ function normalizeProfiles(rawProfiles, legacy = {}) {
     // 仅显式 true 才算（用 === 严格判定，避免历史脏值被误判为试用配置而锁死）
     trial: p.trial === true,
     // vision：该配置的模型是否支持读图（多模态）。只有显式 true 才算开启 ——
-    // 老 settings.json 没有这个字段，一律按"不支持"处理（保守：不发图就不会 400）。
+    // 新装 / 新建配置的默认值已改为 true（见 DEFAULT_DEEPSEEK_PROFILE 与 profiles:create）；
+    // 存量配置的一次性迁移在 loadSettings 里做（带 visionMigrated 标记，用户手动取消后不会被重置）。
     vision: p.vision === true,
   }))
   profiles.forEach(migrateLegacyDefaultModel)
@@ -286,6 +288,15 @@ function loadSettings() {
     modelProfiles: normalizeProfiles(raw.modelProfiles, raw),
     activeProfileId: typeof raw.activeProfileId === 'string' ? raw.activeProfileId : DEEPSEEK_PROFILE_ID,
   }
+  // 一次性迁移：把存量配置的「支持读图（多模态）」统一改为开启。
+  // 背景：新版默认多模态，但老 settings.json 里显式存着 `vision: false`（normalizeProfiles
+  // 只在缺字段时兜底，不会改写已存的值），光改默认值的话老用户仍需手动去勾。
+  // 必须带 visionMigrated 标记：迁移完成后写回盘，用户此后手动取消勾选（vision: false）
+  // 不会在下次启动时被重新打开 —— 否则等于剥夺了用户关掉它的权利。
+  if (raw.visionMigrated !== true) {
+    state.settings.modelProfiles.forEach((p) => { p.vision = true })
+  }
+  state.settings.visionMigrated = true
   if (!state.settings.skillsDir) state.settings.skillsDir = DEFAULT_SKILLS_DIR
   if (!state.settings.memoryDir) state.settings.memoryDir = DEFAULT_MEMORY_DIR
   if (state.settings.activeProfileId !== DEEPSEEK_PROFILE_ID && !state.settings.modelProfiles.some((p) => p.id === state.settings.activeProfileId)) {
@@ -689,7 +700,7 @@ function registerIpc() {
   }))
   ipcMain.handle('profiles:create', (_event, name) => {
     const id = `profile-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
-    const profile = { id, name: typeof name === 'string' && name.trim() ? name.trim() : '新模型', apiKey: '', baseUrl: DEFAULT_BASE_URL, model: DEFAULT_MODEL_ID, contextWindow: DEFAULT_CONTEXT_WINDOW, builtin: false, trial: false, vision: false }
+    const profile = { id, name: typeof name === 'string' && name.trim() ? name.trim() : '新模型', apiKey: '', baseUrl: DEFAULT_BASE_URL, model: DEFAULT_MODEL_ID, contextWindow: DEFAULT_CONTEXT_WINDOW, builtin: false, trial: false, vision: true }
     state.settings.modelProfiles.push(profile)
     saveSettings()
     return { ...profile, apiKey: '', hasApiKey: false }
@@ -703,7 +714,7 @@ function registerIpc() {
     // 兼容存量：旧版本「立即试用」生成的页签没有 trial 标记，这里按名称识别并补标，避免重复建页签
     if (!profile) profile = state.settings.modelProfiles.find((p) => p.name === '免费试用')
     if (!profile) {
-      profile = { id: `profile-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name, apiKey: '', baseUrl: DEFAULT_BASE_URL, model: DEFAULT_MODEL_ID, contextWindow: DEFAULT_CONTEXT_WINDOW, builtin: false, trial: true, vision: false }
+      profile = { id: `profile-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name, apiKey: '', baseUrl: DEFAULT_BASE_URL, model: DEFAULT_MODEL_ID, contextWindow: DEFAULT_CONTEXT_WINDOW, builtin: false, trial: true, vision: true }
       state.settings.modelProfiles.push(profile)
     }
     profile.trial = true
@@ -712,7 +723,7 @@ function registerIpc() {
     if (typeof data.baseUrl === 'string' && data.baseUrl.trim()) profile.baseUrl = data.baseUrl.trim()
     if (typeof data.model === 'string' && data.model.trim()) profile.model = data.model.trim()
     if (typeof data.contextWindow === 'number' && data.contextWindow >= MIN_CONTEXT_WINDOW) profile.contextWindow = data.contextWindow
-    // 服务端可以顺带声明这个模型能不能收图片（多模态）；没下发就保持原值/默认关
+    // 服务端可以顺带声明这个模型能不能收图片（多模态）；没下发就保持原值（新建时默认开）
     if (typeof data.vision === 'boolean') profile.vision = data.vision
     saveSettings()
     return { success: true, profileId: profile.id, profile: { ...profile, apiKey: '', hasApiKey: !!profile.apiKey } }

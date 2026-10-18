@@ -276,10 +276,34 @@ export const useAppStore = defineStore('app', () => {
       added.push(p)
     }
     if (added.length > 0) {
-      // 同步到主进程，授予 AI read_file 读取权限
-      window.electronAPI.attachFiles(added).catch(e => {
-        console.error('[attach] failed to register paths:', e)
-      })
+      // 同步到主进程，授予 AI read_file 读取权限；**注册成功后再取缩略图**
+      // （attachments:thumbnails 只对已授权路径生成，顺序反了就永远是空图）
+      window.electronAPI.attachFiles(added)
+        .then(() => hydrateThumbnails(added))
+        .catch(e => {
+          console.error('[attach] failed to register paths:', e)
+        })
+    }
+  }
+
+  // 附件缩略图统一由主进程从**落盘文件**生成（nativeImage 解码 → 96px → PNG data URL，几 KB）。
+  // 原先「导入文件」那条路只有路径、永远显示兜底图标；「粘贴/拖拽」那条路直接把剪贴板的
+  // 原始 data URL 塞进 chip —— 实测一张 3508x2550 的扫描件 data URL 有 9.6MB，
+  // 白白让渲染层持有并解码这么大的字符串。现在两种入口都走这里。
+  async function hydrateThumbnails(paths) {
+    const list = (Array.isArray(paths) ? paths : []).filter(p => typeof p === 'string' && p)
+    if (list.length === 0) return
+    try {
+      const res = await window.electronAPI.imageThumbnails(list)
+      const thumbs = (res && res.thumbs) || {}
+      // 成功拿到小图的就把 preview 换掉（粘贴路径下顺带释放那份几 MB 的原始 data URL）；
+      // 拿不到的保留原值，渲染层仍有兜底图标可用。
+      for (const f of attachedFiles.value) {
+        const t = thumbs[f.path]
+        if (t) f.preview = t
+      }
+    } catch (e) {
+      console.error('[attach] failed to load thumbnails:', e)
     }
   }
 
@@ -288,6 +312,51 @@ export const useAppStore = defineStore('app', () => {
     window.electronAPI.detachFile(p).catch(e => {
       console.error('[attach] failed to unregister path:', e)
     })
+  }
+
+  // 粘贴 / 拖拽进来的图片：渲染层手里只有 data URL（剪贴板与拖拽都拿不到本地路径），
+  // 先交给主进程落盘 + 授权（userData/pasted-images/<会话id>/），再并入**同一份**
+  // attachedFiles —— 于是下游（sendMessage 的 plainAttached → chat.js → fs-safe.localImagePart）
+  // 完全不需要区分"导入的"还是"粘贴的"，一行都不用改。
+  // preview 只给缩略图用，**不进 IPC**：sendMessage 里显式只取 { path, name }。
+  async function attachImages(dataUrls) {
+    const list = (Array.isArray(dataUrls) ? dataUrls : [])
+      .filter(u => typeof u === 'string' && u.startsWith('data:image/'))
+    if (list.length === 0) return []
+    try {
+      const res = await window.electronAPI.savePastedImages(currentConvId.value, list)
+      if (!res || !res.success) {
+        showNotice((res && res.error) || '图片保存失败', 'error')
+        return []
+      }
+      const existing = new Set(attachedFiles.value.map(f => f.path))
+      const added = []
+      for (const f of res.files || []) {
+        if (!f || !f.path || existing.has(f.path)) continue
+        existing.add(f.path)
+        attachedFiles.value.push({ path: f.path, name: f.name, preview: list[f.index] || '' })
+        added.push(f)
+      }
+      // 缩略图交给主进程从落盘文件生成（落盘时已授权，见 attachments:savePastedImages）。
+      // 拿到之前先用剪贴板 data URL 顶着，避免 chip 闪一下兜底图标。
+      if (added.length > 0) await hydrateThumbnails(added.map(f => f.path))
+      if (Array.isArray(res.failed) && res.failed.length > 0) {
+        showNotice(`有 ${res.failed.length} 张图片未能添加：${res.failed[0].error}`, 'error')
+      }
+      return added
+    } catch (e) {
+      console.error('[attach] failed to save pasted images:', e)
+      showNotice('图片保存失败：' + (e.message || ''), 'error')
+      return []
+    }
+  }
+
+  // 消息已发出后清掉附件 chips（**不动主进程白名单**）。
+  // 之前只有切会话/新建会话才清，于是粘一张图之后**每条消息都会重发同一张**
+  // （而且按 token 计费，每轮都重发）。白名单里必须留着这些路径，请求组装时
+  // fs-safe.localImagePart 才过得了校验，所以这里只清渲染层的列表。
+  function consumeAttachedFiles() {
+    attachedFiles.value = []
   }
 
   function clearAttachedFiles() {
@@ -1100,6 +1169,11 @@ export const useAppStore = defineStore('app', () => {
       // resumeNote：「带补充说明的继续」时，用户写的那句要求。主进程命中续跑快照时会把
       // 末尾那条 user 消息换成续跑提示，所以补充说明必须单独传过去拼上，否则会被静默丢掉。
       await window.electronAPI.sendChat(convId, history, activeProfileId.value, webSearchEnabled.value, autoExecute.value, plainAttached, resumeTurn, opts.note || '')
+      // 消息已带图发出：清掉附件 chips，避免粘一张图之后**每条消息都重发同一张**
+      // （旧行为只有在切会话/新建会话时才清，图片因此会粘在后续每一轮请求里，
+      //  每轮都按 token 计费）。主进程白名单里保留这些路径 —— 本轮的
+      //  fs-safe.localImagePart 校验还要用它。
+      consumeAttachedFiles()
     } catch (e) {
       st.error = e.message
       st.isStreaming = false
@@ -1237,8 +1311,10 @@ export const useAppStore = defineStore('app', () => {
     // File Attachments
     attachedFiles,
     attachFiles,
+    attachImages,
     removeAttachedFile,
     clearAttachedFiles,
+    consumeAttachedFiles,
     // 文件打开与 Markdown 预览
     notice,
     openFile,

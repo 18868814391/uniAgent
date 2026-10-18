@@ -42,7 +42,7 @@
             <span>该模型支持读图（多模态）</span>
           </label>
           <p class="field-hint">
-            勾选后 AI 会多出一个「取网页图片」的能力：你丢一个网页地址给它，它能真的<strong>看到</strong>页面里的图片（横幅 / 图表 / 布局 / 截图类内容），而不只是读文字。纯文本模型<strong>不要勾</strong>——服务端会拒收图片，那一轮会直接报错。
+            勾选后 AI 会多出一个「取网页图片」的能力：你丢一个网页地址给它，它能真的<strong>看到</strong>页面里的图片（横幅 / 图表 / 布局 / 截图类内容），而不只是读文字。<strong>现已默认勾选</strong>（主流模型都支持图片输入）；若你用的确实是纯文本模型，请<strong>取消勾选</strong>——服务端会拒收图片，那一轮会直接报错。
           </p>
         </div>
         <div class="field-group"><button class="btn-test" :disabled="testing || trialLoading || isTrial || (!form.apiKey && !selectedProfile?.hasApiKey)" @click="testConnection">{{ isTrial ? '试用配置不可修改' : testing ? '测试中...' : '测试连接并保存' }}</button><div v-if="testResult" class="test-result" :class="testResult.success ? 'success' : 'error'"><span>{{ testResult.message }}</span></div></div>
@@ -670,7 +670,9 @@ const form = reactive({
   model: 'deepseek-flash',
   // 该模型是否支持读图（多模态）。勾了才会给 AI 下发「取网页图片」的工具，
   // 见 electron/chat.js 的 visionCapable 闸门与 settings.js 的 visionSection。
-  vision: false,
+  // 默认 true（与主进程 DEFAULT_DEEPSEEK_PROFILE / profiles:create 同口径）：
+  // 主流模型都支持图片输入，页面初值不能是 false，否则首屏会闪一下未勾选态。
+  vision: true,
   skillsDir: '',
   memoryDir: '',
   allowedDirs: [],

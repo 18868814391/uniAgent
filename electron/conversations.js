@@ -4,7 +4,7 @@
 //  AI 标题生成、附加文件读取授权,以及 conversations / attachments
 //  域的 IPC 注册。
 // ============================================================
-const { app, ipcMain, dialog, shell } = require('electron')
+const { app, ipcMain, dialog, shell, nativeImage } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const state = require('./state')
@@ -13,6 +13,25 @@ const { deleteConvSummary } = require('./context')
 const { deleteToolActivity } = require('./tool-activity')
 const { clearTurnSnapshot } = require('./turn-snapshot')
 const { clearTodos } = require('./tools/todo')
+
+// 粘贴/拖拽图片（data URL 落盘）的两个常量。
+// 10MB 与 fs-safe.MAX_IMAGE_BYTES 同口径 —— 这里先拦是为了给出可读提示，
+// 而不是等整轮请求在 fs-safe 里报「图片过大（单张上限 10MB）」。
+const MAX_PASTED_IMAGE_BYTES = 10 * 1024 * 1024
+// fs-safe.imageMimeForPath 靠**扩展名**认图（只认 .jpg/.jpeg/.png/.webp），
+// 故落盘时必须按真实 mime 给扩展名，否则文件写出来了却不会被当成图片。
+const PASTED_IMAGE_EXT = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+}
+
+// 图片附件的缩略图：与 fs-safe.IMAGE_MIME_BY_EXT 同口径的扩展名集合。
+// 这里只用来判断「这张附件是不是图」，所以内联一份，不为一个判断去 require tools/fs-safe
+// （既有做法同 ChatView.vue 的 IMAGE_EXT_RE，注释标明同口径即可）。
+const THUMB_IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp'])
+// 缩略图宽度：附件 chip 只有 44px，96px 宽足够清晰又不糊（含 HiDPI 余量）。
+const THUMB_WIDTH = 96
 
 // CONVERSATIONS_DIR 需在 app ready 后才能取 userData，故惰性求值（模块可能在 ready 前被 require）
 function getConversationsDir() {
@@ -35,6 +54,25 @@ function getConvIndexPath() {
 
 function getConvMessagesPath(id) {
   return path.join(getConversationsDir(), `${id}.json`)
+}
+
+// 粘贴/拖拽进来的图片落盘目录：userData/pasted-images/<会话id>/。
+// 为什么不落在授权目录里：用户 Ctrl+V 一张截图时并没有指定任何目录，
+// 往他的工作目录丢文件既意外又难清理；userData 是本应用的私有目录，
+// 且这里的文件**不经 isPathAllowed 放行**（见下面 add 到 state.attachedFilePaths），
+// 所以 AI 的 read_file 够不到它们 —— 只有"作为视觉载荷随本条消息发出"这一条通路。
+function getPastedImagesDir(convId) {
+  return path.join(app.getPath('userData'), 'pasted-images', String(convId))
+}
+
+// 删除会话时连带清理该会话的粘贴图片（否则一个会话聊几次就留下一堆 png 永久占盘）
+function cleanupPastedImages(convId) {
+  if (!convId) return
+  try {
+    fs.rmSync(getPastedImagesDir(convId), { recursive: true, force: true })
+  } catch (e) {
+    console.warn('[attachments] 清理粘贴图片失败:', e && e.message)
+  }
 }
 
 function loadConvIndex() {
@@ -71,6 +109,7 @@ function cleanupExpiredConversations() {
       deleteConvSummary(conv.id)   // 同步清理历史摘要 sidecar
       deleteToolActivity(conv.id)  // 以及工具活动台账（压缩时喂给摘要器的那份）
       clearTurnSnapshot(conv.id)   // 以及中断续跑快照，避免留下孤儿文件
+      cleanupPastedImages(conv.id) // 以及粘贴进来的图片
     }
   }
   if (removed > 0) {
@@ -108,6 +147,7 @@ function cleanupEmptyConversations() {
       deleteConvSummary(conv.id)
       deleteToolActivity(conv.id)
       clearTurnSnapshot(conv.id)
+      cleanupPastedImages(conv.id)
     }
   }
   if (removed > 0) {
@@ -306,6 +346,9 @@ function normalizeMessages(raw) {
 function registerIpc() {
   cleanupEmptyConversations()
   cleanupExpiredConversations()
+  // 上次运行留下的「会话尚未建立时粘贴的图片」桶：那些图对应的会话最终没建起来，
+  // 永远不会被 conversations:delete 清理，只能在这里兜掉。
+  cleanupPastedImages('unsaved')
 
   ipcMain.handle('conversations:list', () => {
     const list = loadConvIndex()
@@ -363,6 +406,7 @@ function registerIpc() {
     deleteToolActivity(id)  // 同步清理工具活动台账
     clearTurnSnapshot(id)   // 同步清理中断续跑快照
     clearTodos(id)          // 同步清理任务清单（update_todos）
+    cleanupPastedImages(id) // 同步清理粘贴进来的图片
     return { success: true }
   })
 
@@ -562,6 +606,86 @@ function registerIpc() {
   ipcMain.handle('attachments:clear', () => {
     state.attachedFilePaths.clear()
     return { success: true }
+  })
+
+  // --- 粘贴 / 拖拽进来的图片：data URL → 落盘 → 授权 ---
+  // 渲染层从剪贴板（Ctrl+V）或 dataTransfer（拖拽）只能拿到 data URL / File，
+  // 而主进程的视觉载荷入口（fs-safe.localImagePart）只认**本地文件路径**。
+  // 所以在这里把 data URL 落成真实 png，再走与「导入文件」完全相同的通路 ——
+  // 下游（buildImageParts → addImagePartsToLatestUser）一行都不用改。
+  //
+  // 两条硬约束：
+  //   ① 必须 state.attachedFilePaths.add()，否则 localImagePart 会在 isPathAllowed 处
+  //      抛「图片访问被拒绝」（它要求路径在白名单内，userData 不在白名单里）。
+  //   ② 单张 >10MB 直接拒绝：fs-safe 的 MAX_IMAGE_BYTES 也会拒，但那时用户已经
+  //      发出去、整轮报错；在这里挡下来才能给出「这张图太大」这种可读提示。
+  ipcMain.handle('attachments:savePastedImages', (_event, convId, dataUrls) => {
+    const list = Array.isArray(dataUrls) ? dataUrls : []
+    if (list.length === 0) return { success: true, files: [], failed: [] }
+    // 会话还没建（用户首条消息发出前就粘了图）时落到固定的 unsaved 桶，
+    // 该桶在下次启动时清理（见 registerIpc 开头），不会一直占盘。
+    const dir = getPastedImagesDir(convId || 'unsaved')
+    const files = []
+    const failed = []
+    try {
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+      list.forEach((dataUrl, i) => {
+        const m = /^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i.exec(String(dataUrl || ''))
+        if (!m) {
+          failed.push({ index: i, error: '不是有效的图片数据' })
+          return
+        }
+        const mime = m[1].toLowerCase()
+        const buffer = Buffer.from(m[2], 'base64')
+        if (buffer.length > MAX_PASTED_IMAGE_BYTES) {
+          failed.push({ index: i, error: `图片过大（单张上限 ${MAX_PASTED_IMAGE_BYTES / 1024 / 1024}MB）` })
+          return
+        }
+        // 扩展名按真实 mime 定，别一律写成 png：fs-safe 的 imageMimeForPath 靠扩展名认图
+        const ext = PASTED_IMAGE_EXT[mime] || '.png'
+        const name = `pasted-${Date.now()}-${i}${ext}`
+        const filePath = path.join(dir, name)
+        fs.writeFileSync(filePath, buffer)
+        state.attachedFilePaths.add(filePath)
+        // index：原始下标。落盘失败的图不占位，渲染层要靠它把缩略图（preview）
+        // 和落盘结果对应起来，否则"第 2 张失败"会让后面每张的预览都错位。
+        files.push({ path: filePath, name, index: i })
+      })
+    } catch (e) {
+      console.error('[attachments] 粘贴图片落盘失败:', e)
+      return { success: false, error: e.message || '图片保存失败', files, failed }
+    }
+    return { success: true, files, failed }
+  })
+
+  // --- 图片附件缩略图：由主进程从**落盘文件**生成，而不是渲染层手里的 data URL ---
+  // 渲染层要用一张小图来画附件 chip。原先只有「粘贴/拖拽」那条路有缩略图（它手里正好
+  // 有剪贴板的 data URL），「导入文件」那条路只有路径、于是永远显示兜底图标。
+  // 现在统一走这里：nativeImage 解码 → 缩到 96px 宽 → PNG data URL（几 KB）。
+  // 好处：① 导入 / 粘贴 / 拖拽三种入口行为一致；② 渲染层不必把几 MB 的原始
+  // base64 搬来搬去；③ 缩略图由文件重新编码生成，不受来源 data URL 的格式细节影响。
+  ipcMain.handle('attachments:thumbnails', (_event, paths) => {
+    const list = Array.isArray(paths) ? paths : []
+    const thumbs = {}
+    for (const p of list) {
+      if (typeof p !== 'string') continue
+      const resolved = path.resolve(p)
+      // 只对**已授权**路径生成：渲染层拿任意路径过来也读不到图（与 localImagePart 同一道闸）
+      if (!state.attachedFilePaths.has(resolved)) continue
+      if (!THUMB_IMAGE_EXTS.has(path.extname(resolved).toLowerCase())) continue
+      try {
+        const stat = fs.statSync(resolved)
+        if (!stat.isFile() || stat.size > MAX_PASTED_IMAGE_BYTES) continue
+        const img = nativeImage.createFromBuffer(fs.readFileSync(resolved))
+        if (img.isEmpty()) continue   // 损坏 / 格式不支持：createFromBuffer 返回空图（不抛）
+        const { width } = img.getSize()
+        const small = width > THUMB_WIDTH ? img.resize({ width: THUMB_WIDTH, quality: 'good' }) : img
+        thumbs[p] = small.toDataURL()
+      } catch {
+        // 单张失败（文件已被删 / 读不动）不影响其它图，渲染层留兜底图标
+      }
+    }
+    return { success: true, thumbs }
   })
 }
 
