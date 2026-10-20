@@ -8,7 +8,7 @@
 //
 //  三种场景都会提醒（都是"用户切走了、需要有人告诉他"的情况）：
 //    - 正常完成 ：「XXX」已完成
-//    - 异常结束 ：「XXX」执行出错（超时 / 报错 / 轮次耗尽 / 没生成回答 / 工具调用没执行）
+//    - 异常结束 ：「XXX」执行出错（超时 / 报错 / 轮次耗尽 / 没生成回答 / 工具调用没执行 / 清单未完成）
 //    - 需要作答 ：ask_user 弹出提问卡片 —— **对话真的卡住了**，用户不回来点它就永远不动
 //
 //  刻意**不**提醒的一种：'aborted' —— 用户自己点的「中断」，他就在旁边，再弹通知是废话。
@@ -39,7 +39,9 @@ const DONE_REASONS = ['complete']
 // 异常收尾（endReason 取值见 chat.js 收尾段）。
 // text_tool_call 也算异常：网关不支持原生 function calling，本轮工具一个都没真跑，
 // 用法上等同于"AI 说要干活然后什么都没干"——用户切走时最需要知道的就是这种静默失败。
-const FAILED_REASONS = ['timeout', 'error', 'max_iterations', 'no_answer', 'text_tool_call']
+// unfinished_todos 同理：AI 自己收了尾，但任务清单上还有没做完的项（收口闸门放行后仍如此），
+// 这时候报「任务完成」就是错的 —— 2026-10-18 真实事故里用户就是被"任务完成 + 清单 1/8"弄糊涂的。
+const FAILED_REASONS = ['timeout', 'error', 'max_iterations', 'no_answer', 'text_tool_call', 'unfinished_todos']
 // 异常原因 → 通知里的一句话。用「用户看得懂的现象」而不是 endReason 的内部枚举名。
 const FAILED_LABELS = {
   timeout: '连接超时，任务中断',
@@ -47,6 +49,7 @@ const FAILED_LABELS = {
   max_iterations: '多次无进展被收口，任务未完成',
   no_answer: '未生成回答',
   text_tool_call: '工具调用未执行（当前网关不支持原生 function calling）',
+  unfinished_todos: '任务清单还有未完成项，AI 提前收尾',
 }
 
 // 通知标题（Windows 横幅第一行，加粗），正文在第二行。

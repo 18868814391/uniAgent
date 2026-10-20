@@ -737,6 +737,8 @@ export const useAppStore = defineStore('app', () => {
       no_answer: 'AI 本轮未生成有效回答',
       // 网关不支持原生 function calling：工具调用被写进正文，工具实际一次都没执行
       text_tool_call: '模型把工具调用写成了正文，本轮工具没有执行',
+      // 收口闸门放行后清单仍有未完成项：AI 自己收了尾，但任务没做完（见 electron/todo-gate.js）
+      unfinished_todos: '任务清单还有未完成项，AI 提前结束了本轮',
       error: '本轮请求出错，未能完成',
     }
     return { endReason, message: reasons[endReason] || reasons.error, detail: detail || '' }
@@ -1024,6 +1026,10 @@ export const useAppStore = defineStore('app', () => {
         // 显示在输入框上方，让"正在扫几万个文件"有可见反馈，而不是看起来像界面卡死。
         st.statusMessage = data.message || '正在检索…'
         st.toolWaitActive = true
+      } else if (data.type === 'todo_gate') {
+        // 收口闸门（electron/todo-gate.js）：AI 想收尾，但清单没做完 / 正文声称改了文件却没写盘，
+        // 已被主进程要求继续。不显示的话用户只会看到"停了几秒又冒出一段话"，不知道发生过核对。
+        st.statusMessage = data.message || '正在核对任务完成情况...'
       } else if (data.type === 'resumed') {
         // 断点续跑命中：上一轮的工具结果被原样回放，不会重跑。
         // statusMessage 会被首个正文 chunk 清掉，所以另存一份供常驻提示条使用。

@@ -230,7 +230,10 @@ test('每轮都回显，而且新注入的那条永远在请求末尾', async ()
   await chat.handleChatSend(event(), payloadKeepTodos())
 
   const withTools = requests.filter((r) => r.tools)
-  assert.equal(withTools.length, 4, '3 轮工具 + 1 轮正文收尾')
+  // 3 轮工具 + 正文收尾。⚠️ 2026-10-18 起多出 2 轮：清单里那一项始终没标 completed，
+  // 收口闸门会拒收前两次"最终回答"并回推提醒（见 electron/todo-gate.js 与
+  // tests/todo-final-gate.test.js），所以正文轮共 3 次。
+  assert.equal(withTools.length, 6, '3 轮工具 + 3 轮正文（其中 2 轮是收口闸门回推）')
   for (const [i, r] of withTools.entries()) {
     const ms = r.messages
     // 每个请求都会重发全量历史，所以早期注入的那几条还在 —— 不能断言"只有一条"。

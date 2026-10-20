@@ -73,9 +73,11 @@ function fakeWindow({ focused = false, minimized = false, visible = true, destro
 // ============================================================
 //  classifyEndReason —— 唯一的 reason 名单源
 // ============================================================
-test('classifyEndReason：complete → done；超时/报错/轮次/无回答/文本工具调用 → failed', () => {
+test('classifyEndReason：complete → done；超时/报错/轮次/无回答/文本工具调用/清单未完成 → failed', () => {
   assert.strictEqual(notify.classifyEndReason('complete'), 'done')
-  for (const r of ['timeout', 'error', 'max_iterations', 'no_answer', 'text_tool_call']) {
+  // unfinished_todos：收口闸门放行后清单仍有未完成项（见 electron/todo-gate.js）——
+  // AI 自己收了尾但活没干完，绝不能报「任务完成」。
+  for (const r of ['timeout', 'error', 'max_iterations', 'no_answer', 'text_tool_call', 'unfinished_todos']) {
     assert.strictEqual(notify.classifyEndReason(r), 'failed', `${r} 应归 failed`)
   }
 })
@@ -225,6 +227,7 @@ test('buildTaskNotice：异常 → 「XXX」+ 人话原因（标题=任务未完
     ['max_iterations', '多次无进展被收口，任务未完成'],
     ['no_answer', '未生成回答'],
     ['text_tool_call', '工具调用未执行（当前网关不支持原生 function calling）'],
+    ['unfinished_todos', '任务清单还有未完成项，AI 提前收尾'],
   ]
   for (const [reason, label] of cases) {
     const { title, body } = notify.buildTaskNotice({ reason, task: '导出报表', elapsedMs: 30 * 1000 })

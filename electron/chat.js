@@ -21,6 +21,9 @@ const turnSnapshot = require('./turn-snapshot')
 // 工具循环的收口策略（无最大步数 · 按进展收口）：纯函数状态机，与子代理共用。
 // 阈值/文案/判据都在 electron/tool-loop-policy.js，本文件只负责调用与注入。
 const loopPolicy = require('./tool-loop-policy')
+// 收口闸门（2026-10-18）：模型给出"最终回答"时核对清单/写盘，拒收"假完工报告"。
+// 判据与文案都在 electron/todo-gate.js，本文件只负责计数、回推与 endReason 收尾。
+const todoGate = require('./todo-gate')
 // 网络健康：本轮真实失败时上报给右上角状态点（见 noteChatNetworkFailure 的注释）
 const netHealth = require('./net-health')
 const toolActivity = require('./tool-activity')
@@ -613,7 +616,7 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
   let lastFinishReason = null     // 上一次 API 响应的 finish_reason
   let hasRealAnswer = false       // 是否已产生"真正的最终回答"（模型以 stop 结束且无工具调用）
   let brokeEarly = false          // 工具循环是否通过 break 结束（false = 触达绝对刹车，属异常长跑）
-  let endReason = 'complete'      // 本轮结束原因：complete / timeout / max_iterations / no_answer / error
+  let endReason = 'complete'      // 本轮结束原因：complete / timeout / max_iterations / unfinished_todos / no_answer / error
   let endDetail = ''              // 结束原因的补充说明（用于前端提示用户）
   let askPending = false          // 是否正挂起等待用户回答 ask_user
   let consecutiveAskCount = 0     // 连续 ask_user 次数（防 AI 反复反问）
@@ -648,6 +651,15 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
   // 工具循环的收口状态（政策模块持有）：见 electron/tool-loop-policy.js
   const loopState = loopPolicy.newState()
 
+  // ---- 收口闸门的计数（见 electron/todo-gate.js 顶部的事故记录）----
+  // 目的：模型输出"最终回答"时，若清单还没做完、或正文声称改了文件但一次写盘都没发生，
+  // 就拒收这一次回答并回推一条提醒。限次是为了不把用户锁在循环里 —— 两次提醒之后
+  // 仍不照做，就把 endReason 记成 unfinished_todos（通知/横幅都按"未完成"报），不再继续耗 token。
+  let wroteFilesThisRun = 0   // 本次运行**成功**的写盘工具次数（write_file/edit_file/delete_file）
+  let todoGatePushes = 0      // 清单未完成 → 已回推次数（上限 todoGate.MAX_TODO_GATES）
+  let claimGatePushes = 0     // 声称改动但没写盘 → 已回推次数（上限 MAX_CLAIM_GATES）
+  let pendingTodosAtEnd = 0   // 跳出循环那一刻清单里未完成的项数（收尾定 endReason 用）
+
   // ---- 断点续跑：本次请求 history 的指纹 + 本轮 currentMessages 的起始下标 ----
   // currentMessages 要等上下文压缩之后才组装，而 endAbortedTurn 可能在压缩期就被调用，
   // 故这里提前声明为 null（避免闭包引用踩 TDZ），落盘时做空值保护。
@@ -664,6 +676,8 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
   // complete 收尾时反向清理：正常完成的回合没有可续跑的东西，留着会让下次「继续」误命中。
   const persistTurnSnapshot = (reason, by) => {
     if (!conversationId) return false
+    // unfinished_todos 刻意**不**清快照：那是"干到一半自己收尾"，用户点「继续」时
+    // 回放真实工具序列比按历史重建（工具全部重跑）划算得多。见 todo-gate.js。
     if (reason === 'complete' || reason === 'text_tool_call') {
       turnSnapshot.clearTurnSnapshot(conversationId)
       return false
@@ -1254,6 +1268,44 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
         currentMessages.push({ role: 'assistant', content: responseContent })
       }
 
+      // ============================================================
+      //  【收口闸门】模型给出"最终回答"时，先核对它到底干完了没有（2026-10-18）
+      //  背景：工具循环唯一的常规出口就是下面这个「没有 tool_calls 就 break」——
+      //  它此前不看任何状态，于是"侦察完就直接写完工报告"的模型被当成正常完成
+      //  （真实事故见 electron/todo-gate.js 头部：39 次工具调用、0 次写盘、正文却列了 7 个
+      //   改动文件；UI 清单 1/8，右下角通知还弹「任务完成」）。
+      //  只在「模型自认为答完」这条路径上生效：中断 / 文本形态工具调用 / 触达刹车都不拦，
+      //  那几条是另一套收尾语义。限次由 todo-gate 的 MAX_*_GATES 决定。
+      //  ⚠️ 回推必须**新开一条 user 消息**（末尾那条是刚 push 的 assistant 回答），
+      //     不可能与前一条 user 相邻；下一轮循环顶部会把清单段并进这一条。
+      // ============================================================
+      if (toolCalls.length === 0 && !textToolCallDetected && !controller.signal.aborted && !run.stopRequested) {
+        const gate = todoGate.decideFinalGate({
+          todos: todo.getTodos(conversationId),
+          wroteFiles: wroteFilesThisRun,
+          answerText: responseContent,
+          gatesPushed: todoGatePushes,
+          claimPushed: claimGatePushes,
+        })
+        if (gate.text) {
+          if (gate.todoGate) todoGatePushes++
+          if (gate.claimGate) claimGatePushes++
+          const why = [
+            gate.todoGate ? `清单还有 ${gate.openCount} 项未完成` : '',
+            gate.claimGate ? '声称改动但本次运行 0 次写盘' : '',
+          ].filter(Boolean).join('；')
+          console.log(`[chat] 收口闸门回推（${why}）：清单闸门 ${todoGatePushes}/${todoGate.MAX_TODO_GATES}、写盘核对 ${claimGatePushes}/${todoGate.MAX_CLAIM_GATES}`)
+          event.sender.send('chat:status', {
+            convId: conversationId,
+            type: 'todo_gate',
+            message: `收口核对：${why} —— 已要求 AI 继续，不要当作已完成`,
+          })
+          currentMessages.push({ role: 'user', content: gate.text })
+          lastActivity = Date.now()   // 闸门回推后的请求耗时不计入"空闲"判定
+          continue
+        }
+      }
+
       // 判断本轮是否已是"真正的最终回答"：模型以 stop 结束、没有工具调用、有实际内容
       if (lastFinishReason === 'stop' && toolCalls.length === 0 && responseContent.length > 0 && !textToolCallDetected) {
         hasRealAnswer = true
@@ -1262,6 +1314,9 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
       // If no tool calls, we're done
       if (toolCalls.length === 0) {
         brokeEarly = true
+        // 闸门放行（或已用尽）时记下清单余量：收尾据此把 endReason 定成 unfinished_todos，
+        // 而不是 complete —— 否则系统通知会告诉用户"任务完成"，与界面上的清单自相矛盾。
+        pendingTodosAtEnd = todoGate.openTodos(todo.getTodos(conversationId)).length
         break
       }
 
@@ -1453,6 +1508,12 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
         }),
       )
 
+      // 收口闸门用：本次运行**成功**落盘的写盘次数。写失败的调用不算 ——
+      // 「写了但报错」正是模型最容易说成"已改好"的场景（见 tools/todo-gate.js 的 writeSucceeded）。
+      for (const s of steps) {
+        if (todoGate.isWriteTool(s.name) && todoGate.writeSucceeded(s.result)) wroteFilesThisRun++
+      }
+
       // 结果按 tool_calls 原下标回填。并发执行但顺序必须稳定：tool 消息顺序若与
       // assistant 的 tool_calls 顺序不一致，部分 OpenAI 兼容网关会直接 400。
       let foldedTotal = 0
@@ -1591,9 +1652,17 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
       }
     }
 
-    // 汇总本轮结束原因，明确告诉前端：正常完成 / 连接超时 / 工具未执行 / 长跑未收口 / 无回答
+    // 汇总本轮结束原因，明确告诉前端：正常完成 / 连接超时 / 工具未执行 / 长跑未收口 /
+    // 清单未完成 / 无回答
     if (hasRealAnswer && !textToolCallDetected) {
-      endReason = 'complete'
+      // 清单仍有未完成项：AI 是自己收的尾，但**任务没做完** —— 不能报 complete
+      // （否则 task-notify 会弹「任务完成」，与界面上 1/8 的清单自相矛盾）。
+      if (pendingTodosAtEnd > 0) {
+        endReason = 'unfinished_todos'
+        endDetail = todoGate.buildEndDetail(todoGate.openTodos(todo.getTodos(conversationId)))
+      } else {
+        endReason = 'complete'
+      }
     } else if (abortedBy || controller.signal.aborted) {
       // 用户中断 / 空闲超时 / 被新请求取代：终态事件由 endAbortedTurn 统一发出
       endAbortedTurn()
