@@ -12,6 +12,10 @@ const { generateConversationTitle } = require('./ai')
 const { deleteConvSummary } = require('./context')
 const { deleteToolActivity } = require('./tool-activity')
 const { clearTurnSnapshot } = require('./turn-snapshot')
+// 会话日志（2026-10-19）：每轮的完整消息序列是唯一记录，渲染层 history 由它投影得出。
+// 会话删除 / 过期清理时日志与 spill 落盘目录一并清掉（见各 cleanup）。
+const sessionLog = require('./session-log')
+const spill = require('./spill')
 const { clearTodos } = require('./tools/todo')
 
 // 粘贴/拖拽图片（data URL 落盘）的两个常量。
@@ -109,6 +113,8 @@ function cleanupExpiredConversations() {
       deleteConvSummary(conv.id)   // 同步清理历史摘要 sidecar
       deleteToolActivity(conv.id)  // 以及工具活动台账（压缩时喂给摘要器的那份）
       clearTurnSnapshot(conv.id)   // 以及中断续跑快照，避免留下孤儿文件
+      sessionLog.clearLog(conv.id) // 以及会话日志（完整消息序列）
+      spill.clearSession(conv.id)  // 以及该会话 spill 落盘的超大工具结果
       cleanupPastedImages(conv.id) // 以及粘贴进来的图片
     }
   }
@@ -147,6 +153,8 @@ function cleanupEmptyConversations() {
       deleteConvSummary(conv.id)
       deleteToolActivity(conv.id)
       clearTurnSnapshot(conv.id)
+      sessionLog.clearLog(conv.id)
+      spill.clearSession(conv.id)
       cleanupPastedImages(conv.id)
     }
   }
@@ -405,6 +413,8 @@ function registerIpc() {
     deleteConvSummary(id)   // 同步清理历史摘要 sidecar
     deleteToolActivity(id)  // 同步清理工具活动台账
     clearTurnSnapshot(id)   // 同步清理中断续跑快照
+    sessionLog.clearLog(id) // 同步清理会话日志（完整消息序列）
+    spill.clearSession(id)  // 同步清理该会话 spill 落盘的超大工具结果
     clearTodos(id)          // 同步清理任务清单（update_todos）
     cleanupPastedImages(id) // 同步清理粘贴进来的图片
     return { success: true }

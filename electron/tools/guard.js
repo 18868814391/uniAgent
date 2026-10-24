@@ -580,9 +580,69 @@ function evaluateToolCall(name, args) {
 
 // ------------------------------------------------------------
 //  确认框（惰性 require electron —— 单测不会被拖下水）
+//
+//  审批结果是**闭合的四值枚举**，只有 ALLOWED_ONCE 放行（fail-closed）：
+//    allowed-once —— 用户明确点了「执行」。仅此一档批准本次调用。
+//    rejected     —— 用户点了「取消」（明确拒绝）。
+//    cancelled    —— 对话框被系统 / 关窗打断，没拿到用户应答。
+//    unavailable  —— 压根没法弹框（主窗口已销毁 / dialog 不可用 / 抛异常）。
+//
+//  改这里之前的两处旧行为，都是"把没拿到应答当成没批准之外的东西"：
+//    · 旧实现返回 boolean，`res.response === 1`，其它一切（含默认按钮、关窗）直接折成 false；
+//    · `win` 为 null 时会退化成一个**没有父窗口**的对话框继续弹。
+//  第二种尤其危险：主窗口已销毁时那个框可能根本不可见，工具循环却在那里等一个永远不会
+//  到来的点击；而第一种让「关窗 / 系统中断」和「用户说不」在模型眼里长得一模一样，
+//  它只能猜，猜错就再试一次 —— 那正是审批最不该出现的行为。
 // ------------------------------------------------------------
+const APPROVAL = Object.freeze({
+  ALLOWED_ONCE: 'allowed-once',
+  REJECTED: 'rejected',
+  CANCELLED: 'cancelled',
+  UNAVAILABLE: 'unavailable',
+})
+
+function approval(status, reason = '') {
+  return { status, allowed: status === APPROVAL.ALLOWED_ONCE, reason }
+}
+
+/** 只有 allowed-once 算批准；传 boolean 也接受（旧调用方兼容），其余一律不批。 */
+function isApproved(decision) {
+  if (decision === true) return true
+  return !!decision && decision.status === APPROVAL.ALLOWED_ONCE
+}
+
+/** 把未获批准的状态翻译成喂回模型的一句话：让它知道该改做法，而不是原样重试。 */
+function approvalMessage(decision) {
+  const status = decision && decision.status
+  const why = (decision && decision.reason) ? `（${decision.reason}）` : ''
+  if (status === APPROVAL.REJECTED) {
+    return `用户明确取消了该操作${why}。请换用更安全、范围更小的做法，不要原样重试。`
+  }
+  if (status === APPROVAL.CANCELLED) {
+    return `确认框被关闭，没有拿到用户的应答${why}。按「未获批准」处理：不要假设已授权，也不要原样重试；`
+      + '请先说明你要做什么、为什么需要它，再让用户决定。'
+  }
+  if (status === APPROVAL.UNAVAILABLE) {
+    return `无法向用户请求确认${why}。按「未获批准」处理：不要执行该操作。`
+      + '可以改为在项目内、可逆的小范围做法，或让用户自己执行这一步。'
+  }
+  return '该操作未获用户批准。'
+}
+
 async function confirmWithDialog(win, info) {
-  const { dialog } = require('electron')
+  let dialog
+  try {
+    ;({ dialog } = require('electron'))
+  } catch (e) {
+    return approval(APPROVAL.UNAVAILABLE, `无法加载 electron dialog：${e && e.message}`)
+  }
+  if (!dialog || typeof dialog.showMessageBox !== 'function') {
+    return approval(APPROVAL.UNAVAILABLE, 'dialog.showMessageBox 不可用')
+  }
+  // 没有父窗口就不弹：那个框可能根本不可见，而工具循环会在这里无限等待
+  const parent = win && typeof win.isDestroyed === 'function' && !win.isDestroyed() ? win : null
+  if (!parent) return approval(APPROVAL.UNAVAILABLE, '主窗口已销毁，无法弹出确认框')
+
   const options = {
     type: 'warning',
     buttons: ['取消', '执行'],
@@ -593,12 +653,21 @@ async function confirmWithDialog(win, info) {
     detail: `原因：${info.reason}\n\n${info.detail || ''}\n\n是否允许？`,
     title: '操作确认',
   }
-  const res = win ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options)
-  if (win) {
+  let res
+  try {
+    res = await dialog.showMessageBox(parent, options)
+  } catch (e) {
+    // 主窗口在弹框途中被销毁 / 对话框被系统收回：没拿到应答，按未获批准处理
+    return approval(APPROVAL.CANCELLED, `确认框异常结束：${e && e.message}`)
+  } finally {
     // 关窗后强制恢复焦点，否则渲染进程后续的 .focus() 会失灵
-    try { win.focus(); win.webContents.focus() } catch { /* 窗口可能已销毁 */ }
+    try { parent.focus(); parent.webContents.focus() } catch { /* 窗口可能已销毁 */ }
   }
-  return res.response === 1
+  if (!res || typeof res.response !== 'number') {
+    return approval(APPROVAL.CANCELLED, '没有拿到对话框的应答')
+  }
+  if (res.response === 1) return approval(APPROVAL.ALLOWED_ONCE)
+  return approval(APPROVAL.REJECTED, `用户点击了「取消」（按钮索引 ${res.response}）`)
 }
 
 module.exports = {
@@ -606,6 +675,10 @@ module.exports = {
   classifyCommand,
   evaluateToolCall,
   confirmWithDialog,
+  // 审批结果（闭合枚举）：只有 allowed-once 放行，见 confirmWithDialog 上方注释
+  APPROVAL,
+  isApproved,
+  approvalMessage,
   // 细分函数导出，供测试直接断言
   isCriticalPath,
   isSensitivePath,

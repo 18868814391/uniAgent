@@ -10,8 +10,9 @@
 // ============================================================
 const path = require('path')
 const fs = require('fs')
-const crypto = require('crypto')
 const { app } = require('electron')
+// 消息归一化与历史指纹：与 session-log.js 共用同一份实现（见 turn-messages.js 头部）
+const { normalizeTurnMessages, hashHistory } = require('./turn-messages')
 
 const SNAPSHOT_VERSION = 1
 const SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000   // 超期快照不再参与续跑（防陈旧命中）
@@ -33,60 +34,12 @@ function getSnapshotPath(convId) {
 //  历史一致性校验
 // ============================================================
 
-// 只取 role + content 做指纹：渲染层发来的 history 也只有这两个字段，
-// 任何一条消息被改动（用户编辑重发、删消息、换角色新建会话）都会让指纹变化。
-function hashHistory(messages) {
-  const normalized = (Array.isArray(messages) ? messages : []).map((m) => [
-    m && m.role ? String(m.role) : '',
-    m && typeof m.content === 'string' ? m.content : '',
-  ])
-  return crypto.createHash('sha1').update(JSON.stringify(normalized)).digest('hex')
-}
+// hashHistory / normalizeTurnMessages 都在 turn-messages.js（与 session-log 共用同一份口径）。
+// 这里保留同名引用，调用方与测试无需改路径。
 
 // ============================================================
 //  落盘 / 读取 / 清理
 // ============================================================
-
-// 内容可能是数组（多模态消息：text part + image_url part，例如「用户贴了图片」或
-// 「browser_read_images 抓到网页图片后注入的下一轮消息」）。快照**只保留文字部分**：
-// base64 图片动辄 200~400KB 一张，写进去必然超 MAX_SNAPSHOT_BYTES → 整份快照被丢弃
-// （连工具序列一起没了，续跑退化成全部重跑）。
-// ⚠️ 也不能整体退化成空串：续跑回放时那条 user 消息会变成空 content，部分网关直接 400。
-function snapshotTextOf(content) {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
-      .filter((p) => p && p.type === 'text' && typeof p.text === 'string')
-      .map((p) => p.text)
-      .join('\n\n')
-  }
-  return ''
-}
-
-// 收窄字段再落盘：快照会被原样回放给模型，脏字段（多余的 UI 属性、undefined）一律不进文件
-function normalizeTurnMessages(raw) {
-  return (Array.isArray(raw) ? raw : [])
-    .filter((m) => m && typeof m === 'object')
-    .map((m) => {
-      const out = {
-        role: typeof m.role === 'string' ? m.role : 'user',
-        content: snapshotTextOf(m.content),
-      }
-      if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
-        out.tool_calls = m.tool_calls.map((tc) => ({
-          id: tc && tc.id ? String(tc.id) : '',
-          type: 'function',
-          function: {
-            name: tc && tc.function && tc.function.name ? String(tc.function.name) : '',
-            arguments:
-              tc && tc.function && typeof tc.function.arguments === 'string' ? tc.function.arguments : '{}',
-          },
-        }))
-      }
-      if (typeof m.tool_call_id === 'string') out.tool_call_id = m.tool_call_id
-      return out
-    })
-}
 
 /**
  * 落盘一份续跑快照。
@@ -246,6 +199,8 @@ module.exports = {
   INTERRUPTED_TOOL_RESULT,
   getSnapshotPath,
   hashHistory,
+  // 消息归一化：session-log.js 复用同一份实现，避免「快照收窄的字段」与「日志收窄的字段」漂移
+  normalizeTurnMessages,
   saveTurnSnapshot,
   loadTurnSnapshot,
   loadResumableTurn,

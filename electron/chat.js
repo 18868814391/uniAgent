@@ -18,6 +18,12 @@ const { abortSubAgentsForConversation } = require('./sub-agent')
 const { newRunWorkDir, scheduleCleanup, pruneRootLeftovers } = require('./xl-work')
 const orphanCleanup = require('./tools/orphan-cleanup')
 const turnSnapshot = require('./turn-snapshot')
+// 会话日志（2026-10-19）：每轮的完整消息序列（含工具调用与工具结果）都落盘，
+// 渲染层 history 只是它的一次投影。「模型可见 ⟺ 已记录」—— 见 session-log.js 头部。
+const sessionLog = require('./session-log')
+// 超大工具结果落盘（2026-10-19）：超出内联预算的结果换成「首尾预览 + 落盘路径」，
+// 而不是就地压成一行摘要。见 spill.js 头部与 LARGE_CONTEXT_THRESHOLD 的事故记录。
+const spill = require('./spill')
 // 工具循环的收口策略（无最大步数 · 按进展收口）：纯函数状态机，与子代理共用。
 // 阈值/文案/判据都在 electron/tool-loop-policy.js，本文件只负责调用与注入。
 const loopPolicy = require('./tool-loop-policy')
@@ -264,6 +270,17 @@ function mapToolCalls(messages, from = 0) {
   return map
 }
 
+// 已被 spill 落盘替换过的结果（首尾预览形态）。这类内容**不能再折叠**：
+// 折叠会把它压成一行 `[已折叠 · 原 X 字符]`，落盘路径随之消失 ——
+// 模型既看不到预览、也拿不到定位符，只能重新调用工具。spill 的意义就在于
+// 「原文在盘上、随时可取」，把它折掉等于把这条机制废掉。
+const SPILL_MARKER = '【超大结果已落盘】'
+
+/** 该条工具结果是否允许被窗口化折叠（spill 过的结果豁免）。 */
+function shouldFoldContent(content) {
+  return typeof content === 'string' && !content.startsWith(SPILL_MARKER)
+}
+
 /**
  * 就地折叠 [startIndex, end) 区间内的工具结果 content，**按工具类型分两个队列**：
  * 事实原文类保留最近 `factKeep` 条，其余保留最近 `keep` 条，各自独立计数。
@@ -303,6 +320,7 @@ function foldOldToolResults(messages, startIndex = 0, keep = TOOL_RESULT_WINDOW,
       const m = messages[idx[k]]
       // 已折叠过的 content 会短于 minLen，因此天然不会重复折叠
       if (m.content.length < minLen) continue
+      if (!shouldFoldContent(m.content)) continue   // spill 落盘过的：保住预览与定位符
       const head = m.content.slice(0, 160).replace(/\s+/g, ' ').trim()
       m.content = `[已折叠 · 原 ${m.content.length} 字符] ${head}…（需要完整内容请重新调用该工具）`
       folded++
@@ -321,7 +339,7 @@ function foldOldToolResults(messages, startIndex = 0, keep = TOOL_RESULT_WINDOW,
     const key = (calls.get(messages[i].tool_call_id) || {}).key
     if (key && lastIdxByKey.get(key) !== i) {
       const m = messages[i]
-      if (m.content.length >= minLen) {
+      if (m.content.length >= minLen && shouldFoldContent(m.content)) {
         m.content = `[已省略 · 同一目标后面有更新的读取，内容见那次结果]（原 ${m.content.length} 字符）`
         folded++
       }
@@ -672,6 +690,35 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
   // 模型拿不到真实结果。这里保存一份原文，落盘时还原。
   const toolResultOriginals = new Map()
 
+  // 本轮（从用户消息起）的完整消息序列，**已把折叠还原成原文**。
+  // 快照与日志共用这一份：两者都要"真实工具结果"，存折叠摘要会让续跑拿不到内容。
+  const currentTurnMessages = () => (
+    currentMessages && turnStartIndex > 0
+      ? restoreToolResults(currentMessages.slice(turnStartIndex), toolResultOriginals)
+      : []
+  )
+
+  const turnHasToolActivity = (turnMessages) => turnMessages.some(
+    (m) => m.role === 'tool' || (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length),
+  )
+
+  /**
+   * 把本轮完整序列追加进会话日志（见 electron/session-log.js）。
+   * 这是「模型可见 ⟺ 已记录」的落点：正常完成、报错、超时、被取代的轮次**都写**，
+   * 而 turn-snapshot 只在中断时写一份临时 sidecar。
+   */
+  const persistTurnLog = (reason, by) => {
+    if (!conversationId) return false
+    const turnMessages = currentTurnMessages()
+    if (turnMessages.length === 0) return false
+    return sessionLog.appendTurn(conversationId, {
+      messages: turnMessages,
+      endReason: reason,
+      abortedBy: by || null,
+      inputHash: turnInputHash,
+    })
+  }
+
   // 把"被中断的那一轮"完整落盘（含工具调用与工具结果），供用户点「继续」时回放。
   // complete 收尾时反向清理：正常完成的回合没有可续跑的东西，留着会让下次「继续」误命中。
   const persistTurnSnapshot = (reason, by) => {
@@ -682,15 +729,10 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
       turnSnapshot.clearTurnSnapshot(conversationId)
       return false
     }
-    if (!currentMessages || turnStartIndex <= 0) return false
-    // 被 A1 折叠过的结果先还原成原文再落盘 —— 快照的用途是"回放真实工具结果"，
-    // 存摘要会让「继续」的模型看不到实际内容（见 tests/tool-result-window.test.js）。
-    const turnMessages = restoreToolResults(currentMessages.slice(turnStartIndex), toolResultOriginals)
+    const turnMessages = currentTurnMessages()
+    if (turnMessages.length === 0) return false
     // 只有"本轮真的调过工具"才值得存：纯文本的半截回答，渲染层已经作为 partial 消息落盘了
-    const hasToolActivity = turnMessages.some(
-      (m) => m.role === 'tool' || (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length),
-    )
-    if (!hasToolActivity) {
+    if (!turnHasToolActivity(turnMessages)) {
       turnSnapshot.clearTurnSnapshot(conversationId)
       return false
     }
@@ -701,6 +743,16 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
       abortedBy: by || null,
       endReason: reason,
     })
+  }
+
+  // 收尾时的一次性落盘：先写日志（每轮都写），再决定要不要留快照。
+  // 返回 resumable —— 快照写成了、或日志里这一轮已经能用来接断点，都算可续跑。
+  const persistTurn = (reason, by) => {
+    persistTurnLog(reason, by)
+    const fromSnapshot = persistTurnSnapshot(reason, by)
+    if (fromSnapshot) return true
+    if (reason === 'complete' || reason === 'text_tool_call') return false
+    return turnHasToolActivity(currentTurnMessages())
   }
 
   // 统一的终态事件出口。刻意做"本运行仍是该会话当前运行"校验：
@@ -731,7 +783,7 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
 
   const emitDone = (reason, detail, by) => {
     if (state.chatRuns.get(conversationId) !== run) return
-    const resumable = persistTurnSnapshot(reason, by)
+    const resumable = persistTurn(reason, by)
     event.sender.send('chat:done', {
       convId: conversationId,
       fullContent,
@@ -748,7 +800,7 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
   }
   const emitError = (reason, detail, by) => {
     if (state.chatRuns.get(conversationId) !== run) return
-    const resumable = persistTurnSnapshot(reason, by)
+    const resumable = persistTurn(reason, by)
     event.sender.send('chat:error', {
       convId: conversationId,
       message: detail,
@@ -821,19 +873,28 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
   // 渲染层 history 只带 role/content（工具调用与结果从不落盘），用它重建 =
   // 已跑过的工具全部重跑。快照命中要求 history 与中断那一刻完全一致
   // （只多出末尾的「继续」指令），否则退回普通流程。
+  //
+  // 2026-10-19：快照不在（应用崩过 / 正常收尾时被清理 / 超过 TTL）时，从**会话日志**
+  // 兜底 —— 日志每轮都写，所以"上次跑到一半"这件事本身已经记录在磁盘上了，
+  // 不再依赖"中断那一刻恰好写成了快照"。见 electron/session-log.js。
   const resumedSnap =
     resumeTurn && conversationId ? turnSnapshot.loadResumableTurn(conversationId, { messages }) : null
+  const loggedSnap =
+    resumeTurn && conversationId && !resumedSnap
+      ? sessionLog.matchResumableTurn(conversationId, { messages })
+      : null
+  const snap = resumedSnap || loggedSnap
 
-  if (resumedSnap) {
+  if (snap) {
     // 回放前先修工具序列：补齐被中断、没拿到结果的 tool_call，
     // 否则服务端会因"assistant.tool_calls 缺少对应 tool 结果"直接 400。
-    const repairedSequence = turnSnapshot.repairToolSequence(resumedSnap.messages)
+    const repairedSequence = turnSnapshot.repairToolSequence(snap.messages)
     // 「带补充说明的继续」：回放会把末尾那条 user 消息整条换成下面的续跑提示，于是用户写的
     // 补充说明（`messages` 的最后一条正文）**在快照命中时会被静默丢弃** —— 模型完全看不到，
     // 用户以为提了要求其实没提。所以把正文里的补充说明摘出来，拼进续跑提示同一条消息。
     // ⚠️ 不能另开一条 user 消息：连续两条 user 部分网关直接 400（见上面 reminders 合并的注释）。
     const userNote = extractResumeNote(messages, resumeNote)
-    const hint = buildResumeHint(resumedSnap, repairedSequence)
+    const hint = buildResumeHint(snap, repairedSequence)
     currentMessages = [
       { role: 'system', content: systemContent },
       ...repairedSequence.messages,
@@ -1467,17 +1528,22 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
             cmd = String(s.parsedArgs.command || '').trim()
           }
           const win = BrowserWindow.fromWebContents(event.sender)
-          const allowed = await guard.confirmWithDialog(win, {
+          const decision = await guard.confirmWithDialog(win, {
             reason: s.gate.reason || 'AI 请求执行命令',
             detail: s.gate.detail || (cmd ? `命令：${cmd}` : ''),
           })
-          if (allowed) {
+          // fail-closed：只有 allowed-once 放行。rejected / cancelled / unavailable 一律不执行，
+          // 并把**具体是哪种**回给模型 —— 「用户说不」和「压根没问到人」是两件不同的事，
+          // 旧实现两者都折成一个 false，模型只能猜，猜错就原样重试。
+          if (guard.isApproved(decision)) {
             return await executeToolCall(tc, toolCtx)
           }
+          console.log(`[guard] approval not granted for ${name}: ${decision && decision.status}`)
           return JSON.stringify({
             success: false,
-            cancelled: true,
-            error: '用户取消了该操作。请换用更安全、范围更小的做法，不要原样重试。',
+            cancelled: decision.status === guard.APPROVAL.REJECTED,
+            approval: decision.status,
+            error: guard.approvalMessage(decision),
           })
         } catch (err) {
           return JSON.stringify({ success: false, error: err.message })
@@ -1518,19 +1584,28 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
       // assistant 的 tool_calls 顺序不一致，部分 OpenAI 兼容网关会直接 400。
       let foldedTotal = 0
       for (const s of steps) {
-        // 第 2 次完全相同调用：结果后附一条警告（只影响发给 API 的内容；
-        // 前端展示与快照还原仍用 result 原文，见下一行的 toolResultOriginals）。
-        const toolContent = s.repeatStreak === 1 ? s.result + repeatWarnText(s.name) : s.result
+        // ① spill：单份结果超出内联预算 → 原文落盘，请求里换成「首尾预览 + 落盘路径 + 检索提示」。
+        //    必须排在 fold 之前：fold 折的是"本轮更早的条数"，而 spill 换进去的预览本身很短，
+        //    天然不会命中 fold 的 minLen；反过来先 fold 再 spill 就会把折叠摘要当原文存盘。
+        const spilled = spill.maybeSpillToolResult({
+          conversationId,
+          toolName: s.name,
+          callId: s.tc.id,
+          content: s.result,
+        })
+        const base = spilled !== null ? spilled : s.result
+        // ② 第 2 次完全相同调用：结果后附一条警告（只影响发给 API 的内容；
+        //    前端展示与快照还原仍用 result 原文，见下一行的 toolResultOriginals）。
+        const toolContent = s.repeatStreak === 1 ? base + repeatWarnText(s.name) : base
         currentMessages.push({
           role: 'tool',
           tool_call_id: s.tc.id,
           content: toolContent,
         })
-        // 先留原文（供续跑快照还原），再把本轮更早的结果窗口化。只压 content，
+        // 先留原文（供续跑快照/会话日志还原），再把本轮更早的结果窗口化。只压 content，
         // role 与 tool_call_id 保持原样 —— 这是接口不 400 的前提。
-        // 传入 contextWindow：窗口够大时事实原文类完全不折叠（1M 窗口下折叠纯属有害，
-        // 详见文件顶部 LARGE_CONTEXT_THRESHOLD 的注释）。
-        toolResultOriginals.set(s.tc.id, s.result)
+        // spill 过的结果记它的预览形态：日志的用途是"模型当时看到了什么"，全文在落盘文件里。
+        toolResultOriginals.set(s.tc.id, base)
         foldedTotal += foldOldToolResults(
           currentMessages,
           turnStartIndex,
