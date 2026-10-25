@@ -1144,12 +1144,17 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
         }),
         signal: controller.signal,
       }, {
-        // 429/5xx/连接错误 → 指数退避重试；重试前给前端一条可见的状态提示
-        onRetry: (attempt, delayMs, status) => {
+        // 429/5xx/连接错误/首字节超时 → 退避重试；重试前给前端一条可见的状态提示
+        onRetry: (attempt, delayMs, status, info) => {
+          // 超时和连接失败要分开说：超时是「服务端接受了连接但迟迟不回响应头」，
+          // 说成"连接失败"会把人指到查网络上去（多数时候网络是通的，只是这根管子卡了）
+          const reason = status
+            ? `遇到 HTTP ${status}`
+            : (info && info.timedOut ? '服务端响应超时（将换新连接重试）' : '连接失败')
           event.sender.send('chat:status', {
             convId: conversationId,
             type: 'retrying',
-            message: `请求${status ? `遇到 HTTP ${status}` : '连接失败'}，${Math.round(delayMs / 1000)}s 后重试（第 ${attempt} 次）...`,
+            message: `请求${reason}，${Math.round(delayMs / 1000)}s 后重试（第 ${attempt} 次）...`,
           })
         },
       })

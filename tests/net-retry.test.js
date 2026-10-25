@@ -2,7 +2,7 @@
 // 通过 mock 全局 fetch 验证，不发起真实网络请求。
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { fetchWithRetry, parseRetryAfter, sleepAbortable, backoffDelay, describeFetchError } = require('../electron/net-retry.js')
+const { fetchWithRetry, parseRetryAfter, sleepAbortable, backoffDelay, describeFetchError, MAX_TIMEOUT_RETRIES } = require('../electron/net-retry.js')
 
 function makeResponse(status, headers = {}) {
   return {
@@ -93,6 +93,122 @@ test('已中断的信号不重试，原样抛出错误', async () => {
       (err) => err.name === 'AbortError'
     )
     assert.equal(count, 1)
+  } finally {
+    global.fetch = originalFetch
+  }
+})
+
+test('首字节超时会换新连接重试并成功（onRetry 标记 timedOut）', async () => {
+  const originalFetch = global.fetch
+  let count = 0
+  const signals = []
+  global.fetch = (url, opts) => {
+    count++
+    signals.push(opts && opts.signal)
+    // 第 1 次：永不返回响应头（模拟"服务端接了连接但不响应"）→ 触发首字节超时
+    if (count === 1) return new Promise(() => {})
+    return Promise.resolve(makeResponse(200))
+  }
+  try {
+    const retries = []
+    const res = await fetchWithRetry('http://x', {}, {
+      firstByteTimeoutMs: 20,
+      timeoutRetryBaseDelay: 5,
+      onRetry: (a, d, s, info) => retries.push({ a, d, s, info }),
+    })
+    assert.equal(res.status, 200)
+    assert.equal(count, 2, '超时后应再发一次（默认允许重试）')
+    assert.equal(retries.length, 1)
+    assert.equal(retries[0].a, 1)
+    assert.equal(retries[0].s, null)
+    assert.equal(retries[0].info.timedOut, true, '超时重试必须能与其他重试区分开（提示文案要用）')
+    // 每次 attempt 都用**独立的** signal（不是把外部 signal 直接透传）——
+    // 这是"超时能真的掐断旧连接、重试不复用卡死 socket"的前提
+    assert.ok(signals[0] !== signals[1], '两次 attempt 应各自持有独立的 AbortSignal')
+    assert.notEqual(signals[0], undefined)
+  } finally {
+    global.fetch = originalFetch
+  }
+})
+
+test('首字节超时重试耗尽后抛 FetchTimeoutError（不吞成普通错误）', async () => {
+  const originalFetch = global.fetch
+  let count = 0
+  global.fetch = async () => { count++; return new Promise(() => {}) }
+  try {
+    await assert.rejects(
+      () => fetchWithRetry('http://x', {}, { firstByteTimeoutMs: 10, timeoutRetryBaseDelay: 1 }),
+      (err) => err.name === 'FetchTimeoutError' && err.timedOut === true
+    )
+    assert.equal(count, MAX_TIMEOUT_RETRIES + 1, `应为首次 + ${MAX_TIMEOUT_RETRIES} 次重试`)
+  } finally {
+    global.fetch = originalFetch
+  }
+})
+
+test('maxTimeoutRetries: 0 → 首字节超时直接抛，不再重试', async () => {
+  const originalFetch = global.fetch
+  let count = 0
+  global.fetch = async () => { count++; return new Promise(() => {}) }
+  try {
+    await assert.rejects(
+      () => fetchWithRetry('http://x', {}, { firstByteTimeoutMs: 10, maxTimeoutRetries: 0 }),
+      (err) => err.timedOut === true
+    )
+    assert.equal(count, 1)
+  } finally {
+    global.fetch = originalFetch
+  }
+})
+
+test('超时重试等待期间被中断：立即停下，不再发起下一次请求', async () => {
+  const originalFetch = global.fetch
+  const controller = new AbortController()
+  let count = 0
+  global.fetch = (url, opts) => {
+    count++
+    if (opts && opts.signal && opts.signal.aborted) {
+      const e = new Error('aborted')
+      e.name = 'AbortError'
+      return Promise.reject(e)
+    }
+    return new Promise(() => {}) // 首次调用一直挂着，等超时
+  }
+  try {
+    await assert.rejects(
+      () => fetchWithRetry('http://x', { signal: controller.signal }, {
+        firstByteTimeoutMs: 10,
+        timeoutRetryBaseDelay: 10000, // 很长：只有被中断才可能立即返回
+        // 超时后立刻模拟用户点「停止」
+        onRetry: (a, d, s, info) => { if (info.timedOut) controller.abort() },
+      }),
+      (err) => err.name === 'AbortError'
+    )
+    assert.equal(count, 2, '中断后不应再发第三次请求')
+  } finally {
+    global.fetch = originalFetch
+  }
+})
+
+test('超时重试不挤占 429/5xx 的重试预算', async () => {
+  const originalFetch = global.fetch
+  const seq = ['timeout', 'timeout', 429, 200]
+  let count = 0
+  global.fetch = async () => {
+    const step = seq[count++]
+    if (step === 'timeout') return new Promise(() => {})
+    return makeResponse(step, { 'retry-after': '0' })
+  }
+  try {
+    // maxRetries 只给 1 次：若超时也去消耗它，429 那次就会直接返回 429
+    const res = await fetchWithRetry('http://x', {}, {
+      maxRetries: 1,
+      baseDelay: 1,
+      firstByteTimeoutMs: 10,
+      timeoutRetryBaseDelay: 1,
+    })
+    assert.equal(res.status, 200)
+    assert.equal(count, 4)
   } finally {
     global.fetch = originalFetch
   }
