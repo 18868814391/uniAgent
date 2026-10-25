@@ -711,10 +711,25 @@ function continueNoteBlur() {
 }
 
 // 导入文件：图片会作为视觉输入发送，文本文件只记住路径供 AI 按需读取
-// 点选 AI 提问卡片选项：命中"其他/其它/Other"时不当作回答，而是把焦点送进下方固定的输入栏
+//
+// 「其他」类的固定写法（只起"把焦点送进输入栏"的作用，本身不算回答）。
+// ⚠️ 判定必须用「归一化后整串相等」，不能用正则去匹配子串 ——
+// 旧写法是 /其他|其它|other|others/i.test(opt)，于是模型给出的
+// 「其他应收单类型」「其它费用科目」这类**本身就该点的正常选项**全被当成"其他"，
+// 点下去只把焦点挪进输入框、不提交任何回答，现象就是"选项点了没反应"。
+const OTHER_OPTION_TEXTS = new Set(['其他', '其它', 'other', 'others', '自定义', '自填', '手动输入', '以上都不是'])
+function isOtherOption(opt) {
+  const text = String(opt || '').trim().replace(/[：:。，,！!？?\s]+$/, '')
+  if (!text) return false
+  if (OTHER_OPTION_TEXTS.has(text.toLowerCase())) return true
+  // 「其他（请说明）」这类带括号后缀的写法
+  return /^(其他|其它|other|others)\s*[（(][^）)]*[）)]$/i.test(text)
+}
+
+// 点选 AI 提问卡片选项：命中「其他」时不当作回答，而是把焦点送进下方固定的输入栏
 // （输入栏一直可见，这里只是省掉用户点一下的功夫）；其余选项直接回答
 function onOptionClick(opt, idx) {
-  if (/其他|其它|other|others/i.test(opt)) {
+  if (isOtherOption(opt)) {
     askInput.value = ''
     nextTick(() => {
       const el = askInputRef.value
@@ -731,16 +746,24 @@ function answerAsk(answer, optionIndex) {
   if (!q) return
   const value = (answer || '').trim()
   if (optionIndex < 0 && !value) return
-  store.answerAskUser({ id: q.id, answer: value || '', optionIndex })
+  const live = store.answerAskUser({ id: q.id, answer: value || '', optionIndex })
   askInput.value = ''
+  if (!live) explainAskCardStale()
 }
 
 // 取消 AI 提问：回传 cancelled，AI 会收到"用户取消"，基于已有信息推进
 function cancelAsk() {
   const q = store.askUser
   if (!q) return
-  store.answerAskUser({ id: q.id, cancelled: true })
+  const live = store.answerAskUser({ id: q.id, cancelled: true })
   askInput.value = ''
+  if (!live) explainAskCardStale()
+}
+
+// 「点了没反应」的兜底说明（见 store.answerAskUser 的返回值语义）。
+// 卡片所属的那一轮已经结束 → 回答无处可去，把话说明白，别让用户对着死卡片反复点。
+function explainAskCardStale() {
+  store.showNotice('这张提问卡片已经失效（该轮对话已结束），请重新发送一条消息。', 'error', 6000)
 }
 
 // 新一轮提问时清空输入栏（输入栏常驻，不再有"自定义模式"需要复位）

@@ -767,14 +767,24 @@ export const useAppStore = defineStore('app', () => {
   }
 
   // 回答 AI 的 ask_user 提问：回传主进程（继续工具循环）并关闭卡片
+  //
+  // 返回值 = 这次回答是否真的送到了一个**仍在挂起中**的工具循环。
+  // 陈旧卡片兜底：主进程只把回答回填给「该会话仍在挂起中」的 ask_user
+  // （chat.js 的 chat:askUserAnswer 在 run / pendingAsk 不存在时直接 return，问题 id 不符也丢），
+  // 所以**本轮已经结束**却还留着卡片时（这轮早被中断或超时收尾、或用户没理它直接又发了消息），
+  // 点选项在主进程侧会被静默忽略 —— 界面上就是"点了没反应"。
+  // 这里如实回传，由调用方（ChatView）收掉死卡片并给用户一句明确说明。
   function answerAskUser(payload) {
+    const st = currentState.value
     try {
       // 带当前会话 id，主进程按会话路由到挂起的工具循环
       window.electronAPI.answerAskUser({ convId: currentConvId.value, ...payload })
     } catch (e) {
       console.error('[ask] failed to answer:', e)
     }
-    currentState.value.askUser = null
+    const live = st.isStreaming === true
+    st.askUser = null
+    return live
   }
 
   // ========== 角色代码仓库（企业版：切身份自动拉取内网仓库） ==========
