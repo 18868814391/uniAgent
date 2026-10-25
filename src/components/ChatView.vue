@@ -23,8 +23,17 @@
         </div>
       </div>
 
-      <!-- Message list -->
-      <div v-for="(msg, idx) in store.messages" :key="idx" class="message-wrapper">
+      <!-- Message list
+           v-memo：仅当「换了会话（messages 数组引用变）」或「条数变」时才重建这一段。
+           否则输入框每敲一个字都会让 ChatView 整组件重渲染，连带把整段历史消息的 vnode
+           全部重建一遍 —— 会话越长越卡，输入法（拼音逐键触发 input）尤其明显。
+           历史消息对象创建后不会被原地修改（store 里只有 push 与整体替换），故按引用 memo 是安全的。 -->
+      <div
+        v-for="(msg, idx) in store.messages"
+        :key="idx"
+        v-memo="[store.messages, store.messages.length]"
+        class="message-wrapper"
+      >
         <MessageBubble :message="msg" @open-file="store.openFile" @open-external="openExternal" />
       </div>
 
@@ -335,7 +344,9 @@
           rows="1"
           @keydown="handleKeydown"
           @paste="onPaste"
-          @input="autoResize"
+          @input="onInputResize"
+          @compositionstart="onCompositionStart"
+          @compositionend="onCompositionEnd"
           :disabled="store.isStreaming"
         />
         <button
@@ -925,9 +936,26 @@ function autoResize() {
   const el = inputRef.value
   if (!el) return
   el.style.height = 'auto' // 先重置，scrollHeight 才能反映自然内容高度
-  el.style.height = Math.min(el.scrollHeight, MAX_INPUT_HEIGHT) + 'px'
-  el.style.overflowY = el.scrollHeight > MAX_INPUT_HEIGHT ? 'auto' : 'hidden'
+  // scrollHeight 只读一次：写回 height 之后浏览器会再次标脏，再读一次就是第二遍
+  // 强制同步布局（长会话下每敲一个字两个来回，是输入卡顿的直接来源之一）。
+  const natural = el.scrollHeight
+  el.style.height = Math.min(natural, MAX_INPUT_HEIGHT) + 'px'
+  el.style.overflowY = natural > MAX_INPUT_HEIGHT ? 'auto' : 'hidden'
 }
+
+// 输入法（中文/日文等）组合输入期间故意不测高：拼音是逐键触发 input 事件的，
+// 而组合中的文本几乎不可能折行，逐键测量纯属给主线程加负担 ——
+// 每次测量都会强制一次同步布局，会话很长时这一步会牵动整段消息重排，
+// 表现出来就是「敲拼音时输入法按钮慢半拍、候选框跟不上」。
+// 组合结束（文字上屏）时补测一次，最终高度与逐键测量完全一致。
+let composing = false
+function onCompositionStart() { composing = true }
+function onCompositionEnd() {
+  composing = false
+  // 上屏瞬间 DOM 的 value 可能还没刷成最终文本，下一个 tick 再测高
+  nextTick(autoResize)
+}
+function onInputResize() { if (!composing) autoResize() }
 
 // Auto-focus input on mount
 onMounted(() => {
@@ -1004,6 +1032,9 @@ onUnmounted(() => {
   overflow-y: auto;
   padding: 24px 20px 16px;
   scroll-behavior: smooth;
+  /* 提升为独立合成层：消息区是滚动容器，内容（流式 markdown、工具调用明细）频繁变化时
+     没有它就会带着整窗重绘；有了它，改动被限制在这一层内，由合成器处理。 */
+  will-change: transform;
 }
 
 /* Empty State */
@@ -1070,7 +1101,16 @@ onUnmounted(() => {
 }
 
 .message-wrapper {
-  animation: fadeIn 0.3s ease;
+  /* 刻意不加 animation: fadeIn —— `.message-wrapper` 是每条消息一层，历史很长时
+     几十上百层各挂一个淡入动画在长会话下并不便宜；而且逐条淡化对历史消息也没有信息量。
+     （目前该动画因 `.message-bubble`（root 节点）自带 opacity:1 而实际不可见，删掉是纯收获。） */
+  /* 离屏消息跳过渲染/布局/绘制：只按需渲染视口附近的内容。
+     含 auto 的关键字会让该元素的尺寸计算变成「依赖内容」，
+     所以必须同时给一个内存估算值 —— 不附单位即为 estimate 语法。
+     contain-intrinsic-size 只影响「尚未渲染时的占位高度」，上下滚动时滚动条长度会
+     随渲染动态修正，视觉上是可接受的（比逐帧重排整段 DOM 便宜得多）。 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
 }
 
 /* Processing indicator — visible whenever AI is working */
@@ -1225,6 +1265,10 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  /* 工具调用每轮都会重建，而所在的消息区是一条独立的合成层：没有这一行，
+     它下面任何一点变化都会以「重建该层」的方式触发（每帧约 2000 万像素），
+     流式输出时 CPU 会一直贴着单核跑。加上后交由合成器处理，主线程不再受牵连。 */
+  will-change: transform;
 }
 
 .tool-call-item {
@@ -1232,7 +1276,8 @@ onUnmounted(() => {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 6px 12px;
-  animation: fadeIn 0.2s ease;
+  /* 同 .message-wrapper：这个淡入动画同样被 root 节点的 opacity:1 遮住、实际不可见，
+     删掉省下一次动画注册。 */
 }
 
 .tool-call-header {
