@@ -97,6 +97,24 @@ C:/Users/syf/.workbuddy/binaries/node/versions/22.22.2-3/node.exe --check <文�
 - 重复调用检测：同一 `(工具名, 参数)` 连续第 2 次照常执行但附警告，第 3 次起直接拦下。
 - 改动前跑 `tests/tool-loop-policy.test.js` 与 `tests/tool-loop-budget.test.js`。
 
+## 工具集与写盘诊断（2026-10-24，从企业版 b161689 同步）
+
+- **`electron/tool-sets.js`** —— 「子代理能不能拿这个工具」的唯一出处（纯常量 + 纯函数，
+  **不 require 任何项目内模块**，所以 `sub-agent.js` 能安全地在顶层取它，不加剧循环依赖）。
+  ⚠️ **这不是"角色白名单又回来了"**：`DEV_TOOL_NAMES` 在开源版**刻意是 `null`（= 不收窄）**，
+  见上文「角色机制」—— 按角色收窄工具集仍是本版刻意去掉的东西。抽这个模块只是为了让
+  `sub-agent.js` 不再自己写一份过滤逻辑；判据等价于旧版的 `filter(!BLOCKED_TOOLS)`。
+  将来真要加白名单，只把 `DEV_TOOL_NAMES` 赋成 `Set` 即可（调用方无需改）。
+- **`electron/tools/quick-diag.js`** —— 写盘后顺手跑的单文件语法/编译检查
+  （`node --check` / `JSON.parse` / 项目内 `@vue/compiler-sfc` / `esbuild` / `py_compile`）。
+  **只在有错时**给 `result.diagnostics`；异常、超时（3s）、工具链缺失一律静默跳过 ——
+  它绝不能把一次成功的写盘变成失败，也不能慢到让每次编辑都卡一下。
+  接入点是 `tools/index.js` 的 `write_file` / `edit_file` handler（这两个已改成 async）。
+- **收口闸门第三条判据**（`todo-gate.js`）：正文声称"测试/编译通过、已验证"但本次运行
+  0 条 `exitCode=0` 的校验命令 → 回推一次。判据挂在**正文承诺**上，不挂在"有写盘"上
+  （改 `.md` / 配置不需要跑校验，挂在写盘上会变成噪音）。改动前跑 `tests/todo-gate.test.js`
+  与 `tests/todo-final-gate.test.js`（后者是端到端接线测试，用 stub 跑完整 chat 循环）。
+
 ## 测试
 
 `tests/` 下是 node 直跑的单测（`node tests/xxx.test.js`）。判定失败归属的标准动作：

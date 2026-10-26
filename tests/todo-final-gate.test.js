@@ -12,6 +12,10 @@
 //   4) 本轮真写过盘 → 不触发核对
 //   5) 回推不造出连续两条 user 消息（部分网关直接 400）
 //   6) 回推通过 chat:status(type=todo_gate) 让用户看得见
+// 另加自检核对（P0-3，2026-10-24）三条：
+//   7) 声称"验证通过"但没跑校验 → 回推一次后放行
+//   8) 真跑过一条 exitCode=0 的校验命令 → 不回推
+//   9) 校验命令跑挂了（exitCode≠0）→ 仍算"没验证过"
 //
 // chat.js 是 CJS 且加载即 require('electron')，故先把依赖塞进 require.cache。
 // 桩列表与 update-todos-inject.test.js / tool-loop-budget.test.js 保持一致。
@@ -72,9 +76,19 @@ stub('./tools/fs-safe', {
   addImagePartsToLatestUser: (msgs) => msgs,
   imageMimeForPath: () => null,
 })
+// execute_command 的模拟退出码（自检核对按 exitCode===0 计数）。用例可临时改成 1 模拟"校验跑挂"。
+// ⚠️ 不能用"事后改 stub.exports"的方式注入：chat.js 在加载期就解构了 executeToolCall，
+//    改 exports 不会生效 —— 必须让 stub 闭包读这个变量。
+let commandExitCode = 0
+
 stub('./tools', {
   executeToolCall: async (tc) => {
     executed.push(tc.function.name)
+    // execute_command 的返回是**扁平结构**（tools/shell.js 直接 stringify payload）：
+    // 自检核对（P0-3）按 exitCode === 0 计数，所以这里必须给真形状，不能套 result。
+    if (tc.function.name === 'execute_command') {
+      return JSON.stringify({ success: true, stdout: 'ok', stderr: '', exitCode: commandExitCode, killed: false, timedOut: false })
+    }
     return JSON.stringify({ success: true, result: { path: 'C:/game/Assets/Scripts/ModelLib.cs', created: true } })
   },
   killAllChildren: () => {},
@@ -100,7 +114,7 @@ const enc = new TextEncoder()
 const sseLine = (obj) => `data: ${JSON.stringify(obj)}\n\n`
 
 /** 前 toolRounds 次返回一个工具调用（默认 read_file），之后一直返回正文收尾。 */
-function makeFetch(requests, { toolRounds = 0, toolName = 'read_file', text = '改完了，改了 2 个文件。' } = {}) {
+function makeFetch(requests, { toolRounds = 0, toolName = 'read_file', toolArgs = null, text = '改完了，改了 2 个文件。' } = {}) {
   return async (_url, init) => {
     const body = JSON.parse(init.body)
     requests.push(body)
@@ -120,7 +134,7 @@ function makeFetch(requests, { toolRounds = 0, toolName = 'read_file', text = '�
                   index: 0,
                   id: `c${idx}`,
                   type: 'function',
-                  function: { name: toolName, arguments: JSON.stringify({ path: `C:/game/Assets/Scripts/ModelLib.cs`, content: 'x' }) },
+                  function: { name: toolName, arguments: JSON.stringify(toolArgs || { path: `C:/game/Assets/Scripts/ModelLib.cs`, content: 'x' }) },
                 }],
               },
             }],
@@ -212,7 +226,9 @@ test('清单全部完成 → 一次放行，endReason=complete，不多发请求
     { text: '接线 ModelFactory', status: 'completed' },
   ])
   const requests = []
-  currentFetch = makeFetch(requests, { toolRounds: 0, text: '全部做完并验证通过。' })
+  // ⚠️ 正文刻意**不提**"验证通过"：自检核对（P0-3）会把"声称验证过但没跑校验"也拦下来，
+  // 那是另一个用例的事。这里只验证"清单全完成 → 放行"。
+  currentFetch = makeFetch(requests, { toolRounds: 0, text: '两个文件都改完了。' })
   const ev = event()
   await chat.handleChatSend(ev, payload())
 
@@ -290,4 +306,61 @@ test('回推时通过 chat:status(type=todo_gate) 告知渲染层，用户看得
   assert.equal(gates.length, 2, '两次回推各推一次状态')
   assert.match(gates[0].message, /清单还有 2 项未完成/)
   assert.match(gates[0].message, /不要当作已完成/)
+})
+
+// ---------------- 自检核对（P0-3，2026-10-24） ----------------
+// 要证明的是「正文声称」与「工具台账」是被真连起来的：
+//   声称"测试通过" → 台账里 0 条成功校验 → 回推一次；
+//   真跑过一条 exitCode=0 的校验命令 → 不再回推。
+
+test('声称"验证通过"但本次运行没跑任何校验 → 回推一次，然后放行', async () => {
+  resetState(null)   // 无清单，排除清单闸门干扰
+  const requests = []
+  currentFetch = makeFetch(requests, { toolRounds: 0, text: '已经改好了，测试全部通过。' })
+  const ev = event()
+  await chat.handleChatSend(ev, payload())
+
+  assert.equal(requests.length, 2, '应回推 1 次后放行，实测 ' + requests.length + ' 次')
+  assert.match(String(requests[1].messages.at(-1).content), /声称验证过/)
+  assert.match(String(requests[1].messages.at(-1).content), /0 条成功的校验命令/)
+  assert.equal(doneOf(ev).endReason, 'complete', '只给 1 次机会，用尽后按正常完成收尾')
+})
+
+test('真跑过一条 node --check（exitCode=0）再声称通过 → 不回推', async () => {
+  resetState(null)
+  const requests = []
+  currentFetch = makeFetch(requests, {
+    toolRounds: 1,
+    toolName: 'execute_command',
+    toolArgs: { command: 'node --check electron/chat.js' },
+    text: '已经改好了，node --check 通过。',
+  })
+  const ev = event()
+  await chat.handleChatSend(ev, payload())
+
+  assert.deepEqual(executed, ['execute_command'], '应当真的调过一次命令')
+  assert.equal(requests.length, 2, '1 轮工具 + 1 次正文收尾，不该有第三次')
+  assert.equal(gateMsgs(requests[1]).length, 0, '有成功校验记录时不该回推')
+  assert.equal(doneOf(ev).endReason, 'complete')
+})
+
+test('命令跑挂了（exitCode≠0）不能算"验证过"', async () => {
+  commandExitCode = 1   // 模拟 node --check 报语法错退出
+  try {
+    resetState(null)
+    const requests = []
+    currentFetch = makeFetch(requests, {
+      toolRounds: 1,
+      toolName: 'execute_command',
+      toolArgs: { command: 'node --check electron/chat.js' },
+      text: '测试通过。',
+    })
+    const ev = event()
+    await chat.handleChatSend(ev, payload())
+
+    assert.equal(requests.length, 3, '跑挂的校验不算数 → 仍要回推一次')
+    assert.match(String(requests[2].messages.at(-1).content), /声称验证过/)
+  } finally {
+    commandExitCode = 0
+  }
 })

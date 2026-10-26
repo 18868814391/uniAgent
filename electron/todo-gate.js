@@ -17,10 +17,11 @@
 //    · decideFinalGate —— 这一次"最终回答"要不要拒收、以及拒收时说什么
 //    · buildEndDetail  —— 闸门用尽仍没做完时，结束原因里给用户看的明细
 //
-//  两类核对（都可经 chat.js 的计数器限次，避免把用户锁在循环里）：
+//  三类核对（都可经 chat.js 的计数器限次，避免把用户锁在循环里）：
 //    ① 任务清单还有未完成项      → 2 次机会
 //    ② 正文声称改了文件、但本次运行 0 次写盘 → 1 次机会
-//  两类同时命中会**合并成一条** user 消息：连续两条 user 部分网关直接 400。
+//    ③ 正文声称"测试/编译通过、已验证"，但本次运行 0 条**成功**的校验命令 → 1 次机会（2026-10-24 补）
+//  同时命中会**合并成一条** user 消息：连续两条 user 部分网关直接 400。
 // ============================================================
 
 /** 写盘类工具：只有这三个会真正改动磁盘（execute_command 里的脚本不算，无法可靠识别）。 */
@@ -30,6 +31,8 @@ const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'delete_file'])
 const MAX_TODO_GATES = 2
 /** 「声称改动但没写盘」最多回推几次。1 次足够 —— 模型要么补写、要么改口。 */
 const MAX_CLAIM_GATES = 1
+/** 「声称验证过但没校验」最多回推几次。同样 1 次。 */
+const MAX_VERIFY_GATES = 1
 
 /** 清单里未完成的项（pending / in_progress）。 */
 function openTodos(todos) {
@@ -72,6 +75,57 @@ function looksLikeWriteClaim(text) {
   return WRITE_VERB_RE.test(text) && FILE_EXT_RE.test(text)
 }
 
+// ------------------------------------------------------------
+//  「声称验证过」的判据（2026-10-24 补）
+//
+//  要拦的是这个形态：改完文件 → 输出"已修复，测试通过"→ 其实一次校验都没跑。
+//  只能靠提示词要求"改完验证"的话不可靠；我们有代码级闸门，扩一条判据即可。
+//
+//  为什么判据挂在**正文**而不是"有写盘但零校验"：
+//  改 .md / .json 这类纯文档不需要跑校验，硬要求会变成噪音；而"自称验证过"是模型
+//  自己的承诺，拦它不会误伤。
+//  判据刻意保守（只认完成态的校验结论 + 排除否定形态），宁漏不误。
+// ------------------------------------------------------------
+const VERIFY_CLAIM_RE = /(测试(全部|均)?通过|单测通过|用例通过|编译通过|构建成功|打包成功|build\s*(成功|passed|success\w*)|已验证|验证通过|自检通过|校验通过|lint\s*(通过|passed)|tests?\s+(passed|pass)|all\s+tests\s+pass)/i
+// 否定形态：出现即**不**算声称（"未通过"/"没跑测试"/"跳过自检"/"无法验证"）
+const VERIFY_NEGATION_RE = /((未|没|不|无法|不能|尚未|还没)[^。；\n]{0,6}(通过|成功|验证|自检|跑|执行)|跳过(验证|自检)|(测试|编译|构建)[^。；\n]{0,4}(未|没)通过)/
+
+function looksLikeVerifyClaim(text) {
+  if (typeof text !== 'string' || !text) return false
+  if (!VERIFY_CLAIM_RE.test(text)) return false
+  return !VERIFY_NEGATION_RE.test(text)
+}
+
+/**
+ * 这条命令算不算"校验类命令"（用于计数）。
+ * 刻意只收**确实在校验代码/构建**的形态：`npm run dev`、`git status` 都不算。
+ */
+const VERIFY_CMD_RE = /(?:^|[\s;&|(])(?:node\s+--check|node\s+-c(?=\s)|eslint(?=\s|$)|vue-tsc\b|\btsc\b|py_compile|pytest\b|jest\b|vitest\b|\bmvn\b|\bgradle\b|\bgo\s+(?:test|vet|build)\b|cargo\s+(?:test|check|build)\b|(?:npm|yarn|pnpm|bun)\s+(?:test|build|lint|check|typecheck|run\s+(?:test|build|lint|typecheck|check))\b)/i
+
+function isVerifyCommand(command) {
+  if (typeof command !== 'string' || !command) return false
+  return VERIFY_CMD_RE.test(command)
+}
+
+/**
+ * 一条 execute_command 的结果算不算"校验成功"。
+ * execute_command 的返回是**扁平结构**（tools/shell.js 直接 stringify payload）：
+ *   { success, stdout, stderr, exitCode, killed, timedOut }
+ * 口径：success 不为 false 且 exitCode === 0。跑挂了（非 0）不算校验过 ——
+ * 那正是"测试没通过却写测试通过"的场景。
+ */
+function verifySucceeded(resultText) {
+  if (typeof resultText !== 'string' || !resultText) return false
+  let res = null
+  try {
+    res = JSON.parse(resultText)
+  } catch {
+    return false
+  }
+  if (!res || res.success === false) return false
+  return Number(res.exitCode) === 0
+}
+
 /** 清单未完成的提醒文本。最多列 10 项，避免把长清单整份再抄一遍。 */
 function todoGateText(open) {
   const items = open.slice(0, 10).map((t) => `- ${t.status === 'in_progress' ? '[~]' : '[ ]'} ${t.text}`)
@@ -96,29 +150,53 @@ const CLAIM_GATE_TEXT = [
   '② 如实改口：明确说明哪些只是方案、哪些已经落地。',
 ].join('\n')
 
+const VERIFY_GATE_TEXT = [
+  '【收口核对 · 你声称验证过了，但本次运行没有任何成功的校验命令】',
+  '你的回答里写了"测试/编译通过""已验证"之类，但工具台账里**0 条成功的校验命令**',
+  '（node --check / eslint / tsc / vue-tsc / py_compile / pytest / jest / mvn / npm test 都算，退出码必须是 0）。',
+  '不要把"应该能过"写成"验证过"。请立刻二选一：',
+  '① 现在真的跑一次校验（改动文件的语法检查，或该模块的测试），把命令和结果写出来；',
+  '② 如实改口：明确说明"未验证"，以及还欠哪一步验证。',
+].join('\n')
+
 /**
  * 决定这一次"最终回答"是否拒收。
  * @param {object} o
  * @param {Array<{text:string,status:string}>} [o.todos] 当前会话的任务清单（chat.js 从 tools/todo 取）
  * @param {number} [o.wroteFiles]  本次运行成功的写盘工具次数
+ * @param {number} [o.verifyRuns]  本次运行**成功**（exitCode=0）的校验命令次数
  * @param {string} [o.answerText]  模型这次给出的正文（responseContent，不是跨轮累加的 fullContent）
  * @param {number} [o.gatesPushed] 清单闸门已回推次数
  * @param {number} [o.claimPushed] 写盘核对已回推次数
- * @returns {{text:string, todoGate:boolean, claimGate:boolean, open:Array, openCount:number}}
+ * @param {number} [o.verifyPushed] 自检核对已回推次数
+ * @returns {{text:string, todoGate:boolean, claimGate:boolean, verifyGate:boolean, open:Array, openCount:number}}
  */
-function decideFinalGate({ todos, wroteFiles = 0, answerText = '', gatesPushed = 0, claimPushed = 0 } = {}) {
+function decideFinalGate({
+  todos,
+  wroteFiles = 0,
+  verifyRuns = 0,
+  answerText = '',
+  gatesPushed = 0,
+  claimPushed = 0,
+  verifyPushed = 0,
+} = {}) {
   const open = openTodos(todos)
   const todoGate = open.length > 0 && Number(gatesPushed) < MAX_TODO_GATES
   const claimGate =
     Number(claimPushed) < MAX_CLAIM_GATES &&
     Number(wroteFiles) === 0 &&
     looksLikeWriteClaim(answerText)
+  const verifyGate =
+    Number(verifyPushed) < MAX_VERIFY_GATES &&
+    Number(verifyRuns) === 0 &&
+    looksLikeVerifyClaim(answerText)
 
   const parts = []
   if (todoGate) parts.push(todoGateText(open))
   if (claimGate) parts.push(CLAIM_GATE_TEXT)
+  if (verifyGate) parts.push(VERIFY_GATE_TEXT)
 
-  return { text: parts.join('\n\n'), todoGate, claimGate, open, openCount: open.length }
+  return { text: parts.join('\n\n'), todoGate, claimGate, verifyGate, open, openCount: open.length }
 }
 
 /**
@@ -137,10 +215,15 @@ module.exports = {
   WRITE_TOOLS,
   MAX_TODO_GATES,
   MAX_CLAIM_GATES,
+  MAX_VERIFY_GATES,
   CLAIM_GATE_TEXT,
+  VERIFY_GATE_TEXT,
   isWriteTool,
   writeSucceeded,
   looksLikeWriteClaim,
+  looksLikeVerifyClaim,
+  isVerifyCommand,
+  verifySucceeded,
   openTodos,
   todoGateText,
   decideFinalGate,

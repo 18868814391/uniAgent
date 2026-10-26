@@ -1,10 +1,11 @@
 // electron/todo-gate.js 的单测（纯函数，不 require electron）。
 //
 // 背景见模块头：真实会话里模型跑了 39 次工具调用、0 次写盘，却输出"完工报告"，
-// 内核按 complete 收尾。这里锁住三条判据：
+// 内核按 complete 收尾。这里锁住四条判据：
 //   ① 「清单未完成」要拦，但只拦有限次（不能把用户锁在循环里）
 //   ② 「声称改动但 0 次写盘」要拦，且不能误伤如实说明（"我没有修改任何文件"）
 //   ③ 写盘失败 ≠ 改过了（success:false 不算）
+//   ④ 「声称测试/编译通过但 0 条成功校验」要拦（2026-10-24 补，P0-3）
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -124,4 +125,80 @@ test('清单里的脏数据不炸：null、缺字段、非数组', () => {
   assert.deepEqual(gate.openTodos(undefined), [])
   assert.deepEqual(gate.openTodos([null, { text: 'x', status: 'pending' }]).length, 1)
   assert.equal(gate.decideFinalGate({ todos: null, wroteFiles: 0, answerText: '' }).text, '')
+})
+
+// ---------------- ④ 自检核对（P0-3，2026-10-24） ----------------
+// 拦的是这个形态：改完文件 → 输出"已修复，测试通过" → 其实一次校验都没跑。
+// 判据挂在**正文**而不是"有写盘零校验"：改 .md 不需要跑校验，硬要求会变成噪音。
+
+test('looksLikeVerifyClaim：声称通过才命中，否定/如实说明不命中', () => {
+  assert.equal(gate.looksLikeVerifyClaim('已修复，测试全部通过。'), true)
+  assert.equal(gate.looksLikeVerifyClaim('单测通过，编译通过'), true)
+  assert.equal(gate.looksLikeVerifyClaim('all tests pass'), true)
+  assert.equal(gate.looksLikeVerifyClaim('已验证 eslint 无报错'), true)
+
+  assert.equal(gate.looksLikeVerifyClaim('测试未通过，正在排查'), false, '未通过不是声称')
+  assert.equal(gate.looksLikeVerifyClaim('还没跑测试'), false)
+  assert.equal(gate.looksLikeVerifyClaim('未验证'), false)
+  assert.equal(gate.looksLikeVerifyClaim('我没有验证，请你打包时确认'), false)
+  assert.equal(gate.looksLikeVerifyClaim('已经改好了'), false, '只改代码没提质检')
+  assert.equal(gate.looksLikeVerifyClaim(''), false)
+  assert.equal(gate.looksLikeVerifyClaim(null), false)
+})
+
+test('isVerifyCommand：只认校验/构建类命令，dev server 不算', () => {
+  for (const c of ['node --check electron/chat.js', 'npx eslint src/a.vue', 'yarn build', 'npm test',
+    'npm run lint', 'vue-tsc --noEmit', 'python -m py_compile a.py', 'mvn -q compile', 'pytest -q']) {
+    assert.equal(gate.isVerifyCommand(c), true, c)
+  }
+  for (const c of ['git status', 'npm run dev', 'yarn dev', 'ls', 'cat a.js', '', null]) {
+    assert.equal(gate.isVerifyCommand(c), false, String(c))
+  }
+})
+
+test('verifySucceeded：exitCode 必须为 0（跑挂了不算验证过）', () => {
+  assert.equal(gate.verifySucceeded(JSON.stringify({ success: true, exitCode: 0 })), true)
+  assert.equal(gate.verifySucceeded(JSON.stringify({ success: true, exitCode: 1 })), false)
+  assert.equal(gate.verifySucceeded(JSON.stringify({ success: false, exitCode: 0 })), false)
+  assert.equal(gate.verifySucceeded('不是 JSON'), false)
+  assert.equal(gate.verifySucceeded(''), false)
+})
+
+test('自检闸门：声称通过但 0 条校验 → 回推；跑过校验 → 放行', () => {
+  const claim = '已修复，测试全部通过。'
+  const hit = gate.decideFinalGate({ todos: [], answerText: claim, verifyRuns: 0 })
+  assert.equal(hit.verifyGate, true)
+  assert.ok(hit.text.includes('声称验证过'))
+
+  const pass = gate.decideFinalGate({ todos: [], answerText: claim, verifyRuns: 1 })
+  assert.equal(pass.verifyGate, false)
+  assert.equal(pass.text, '')
+
+  // 没声称过验证 → 不触发（改文档不需要跑校验）
+  const silent = gate.decideFinalGate({ todos: [], answerText: '改好了，你把页面打开看看样式。', verifyRuns: 0 })
+  assert.equal(silent.verifyGate, false)
+})
+
+test('自检闸门只给 1 次机会', () => {
+  const r = gate.decideFinalGate({
+    todos: [], answerText: '测试通过', verifyRuns: 0, verifyPushed: gate.MAX_VERIFY_GATES,
+  })
+  assert.equal(r.verifyGate, false)
+})
+
+test('三类同时命中合并成一条消息，顺序稳定（不能变成连续两条 user）', () => {
+  const r = gate.decideFinalGate({
+    todos: PENDING,
+    wroteFiles: 0,
+    verifyRuns: 0,
+    answerText: '已重写 SpriteLib.cs，测试全部通过',
+  })
+  assert.equal(r.todoGate, true)
+  assert.equal(r.claimGate, true)
+  assert.equal(r.verifyGate, true)
+  assert.ok(r.text.includes('任务清单还有 2 项未完成'))
+  assert.ok(r.text.includes('没有任何写盘调用'))
+  assert.ok(r.text.includes('声称验证过'))
+  assert.ok(r.text.indexOf('任务清单还有') < r.text.indexOf('没有任何写盘调用'))
+  assert.ok(r.text.indexOf('没有任何写盘调用') < r.text.indexOf('声称验证过'))
 })

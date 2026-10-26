@@ -21,6 +21,7 @@ const settings = require('../settings')
 const agentsMd = require('../agents-md')
 const todo = require('./todo')
 const subagentPolicy = require('./subagent-policy')
+const quickDiag = require('./quick-diag')
 const { legalNpcSearch } = require('./legal-npc-search')
 const { downloadUrl } = require('./download')
 const { handleSpawnSubAgent, handleGetSubAgentResults } = require('../sub-agent')
@@ -113,8 +114,19 @@ const TOOL_HANDLERS = {
         + (failed.length ? `原因见 failed；常见原因是路径写错、不在授权目录内、或文件过大（单张上限 10MB）。` : '')
     return JSON.stringify({ success: true, result })
   },
-  write_file: ({ path, content }) => JSON.stringify({ success: true, result: fsSafe.writeFileSafe(path, content) }),
-  edit_file: ({ path, old_string, new_string, replace_all }) => JSON.stringify({ success: true, result: fsSafe.editFileSafe(path, old_string, new_string, replace_all) }),
+  // 写盘类：写成功后**顺手带上语法/编译诊断**（2026-10-24）。
+  // 为什么要挂在这里而不是让模型自己跑：模型判断不了"这个项目该跑什么检查"，
+  // 而全项目 typecheck / build 是被明令禁止的（几分钟），模型于是只跑"改动文件的 eslint"，
+  // 语法错误一路漏到用户打包时才炸。quick-diag 只跑单文件秒级检查，
+  // 有错才附 diagnostics 字段，干净时不加任何字段（省 token）；失败一律静默降级。
+  write_file: async ({ path, content }) => {
+    const res = fsSafe.writeFileSafe(path, content)
+    return JSON.stringify({ success: true, result: await quickDiag.attachDiagnostics(res, res && res.path ? res.path : path) })
+  },
+  edit_file: async ({ path, old_string, new_string, replace_all }) => {
+    const res = fsSafe.editFileSafe(path, old_string, new_string, replace_all)
+    return JSON.stringify({ success: true, result: await quickDiag.attachDiagnostics(res, res && res.path ? res.path : path) })
+  },
   // 检索类工具可能扫几万文件、耗时十几秒：把进度回调透传下去，
   // 渲染层在输入框上方显示「正在检索代码…」，避免"无反馈 = 像卡死"
   grep_code: (args, ctx) => grepCode(args, ctx && ctx.onProgress),

@@ -12,6 +12,9 @@ const settings = require('./settings')
 const { looksLikeTextToolCall, parseTextToolCalls } = require('./text-tool-call')
 // 只读策略（纯常量 + 纯函数，无依赖 → 不会加剧上面的循环依赖问题）
 const subagentPolicy = require('./tools/subagent-policy')
+// 工具集判定（纯常量 + 纯函数，不 require 项目内其它模块）：名单只在这一处维护，
+// 不在本文件另写一份（见 AGENTS.md「工具集与写盘诊断」段）。
+const { filterSubAgentTools } = require('./tool-sets')
 
 // ⚠️ 循环依赖陷阱（2026-09-20 实测确认，勿改回顶层解构）
 //   加载链：main.js → chat.js → tools/index.js → sub-agent.js →（若此处 require './tools'）
@@ -144,8 +147,14 @@ function runSubAgentLoop({ subAgentId, task, description, convId, sender, parent
     `当前日期：${new Date().toISOString().slice(0, 10)}`,
   ].filter(Boolean).join('\n')
 
-  // 过滤掉子 Agent 不可用的工具
-  const availableTools = TOOLS_DEFINITION.filter(t => !BLOCKED_TOOLS.has(t.function.name))
+  // 过滤掉子 Agent 不可用的工具。
+  // 名单与判定统一在 electron/tool-sets.js（不在本文件另写一份）：
+  //   · BLOCKED_TOOLS（tools/subagent-policy.js）—— 写类 / 递归派生 / ask_user / update_todos；
+  //   · 若该角色定义了工具白名单，这里会自动按它收窄（开源版无白名单，行为同旧版）。
+  const availableTools = filterSubAgentTools(TOOLS_DEFINITION, {
+    role: state.settings.role,
+    blocked: BLOCKED_TOOLS,
+  })
 
   // ⚠️ 这三个变量必须在 try 之外声明：超时 / 异常时 catch 要用它们回传「已完成的部分成果」。
   //    早期版本声明在 try 内，catch 拿不到 → 只能整段丢弃，主 Agent 白等一整轮（也看不到跑了多少轮）。

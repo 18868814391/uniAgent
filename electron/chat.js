@@ -676,6 +676,11 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
   let wroteFilesThisRun = 0   // 本次运行**成功**的写盘工具次数（write_file/edit_file/delete_file）
   let todoGatePushes = 0      // 清单未完成 → 已回推次数（上限 todoGate.MAX_TODO_GATES）
   let claimGatePushes = 0     // 声称改动但没写盘 → 已回推次数（上限 MAX_CLAIM_GATES）
+  // 自检核对（2026-10-24 补）：模型声称"测试/编译通过"时，核对本次运行到底跑过校验命令没有。
+  // 计数口径见 tools/todo-gate.js 的 verifySucceeded —— **exitCode=0 才算**，
+  // 跑挂的那些不能算"验证过"（那正是"测试没通过却写测试通过"的场景）。
+  let verifyRunsThisRun = 0   // 本次运行成功的校验命令次数
+  let verifyGatePushes = 0    // 自检核对 → 已回推次数（上限 MAX_VERIFY_GATES）
   let pendingTodosAtEnd = 0   // 跳出循环那一刻清单里未完成的项数（收尾定 endReason 用）
 
   // ---- 断点续跑：本次请求 history 的指纹 + 本轮 currentMessages 的起始下标 ----
@@ -1349,18 +1354,22 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
         const gate = todoGate.decideFinalGate({
           todos: todo.getTodos(conversationId),
           wroteFiles: wroteFilesThisRun,
+          verifyRuns: verifyRunsThisRun,
           answerText: responseContent,
           gatesPushed: todoGatePushes,
           claimPushed: claimGatePushes,
+          verifyPushed: verifyGatePushes,
         })
         if (gate.text) {
           if (gate.todoGate) todoGatePushes++
           if (gate.claimGate) claimGatePushes++
+          if (gate.verifyGate) verifyGatePushes++
           const why = [
             gate.todoGate ? `清单还有 ${gate.openCount} 项未完成` : '',
             gate.claimGate ? '声称改动但本次运行 0 次写盘' : '',
+            gate.verifyGate ? '声称验证通过但本次运行 0 条成功的校验命令' : '',
           ].filter(Boolean).join('；')
-          console.log(`[chat] 收口闸门回推（${why}）：清单闸门 ${todoGatePushes}/${todoGate.MAX_TODO_GATES}、写盘核对 ${claimGatePushes}/${todoGate.MAX_CLAIM_GATES}`)
+          console.log(`[chat] 收口闸门回推（${why}）：清单闸门 ${todoGatePushes}/${todoGate.MAX_TODO_GATES}、写盘核对 ${claimGatePushes}/${todoGate.MAX_CLAIM_GATES}、自检核对 ${verifyGatePushes}/${todoGate.MAX_VERIFY_GATES}`)
           event.sender.send('chat:status', {
             convId: conversationId,
             type: 'todo_gate',
@@ -1583,6 +1592,14 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
       // 「写了但报错」正是模型最容易说成"已改好"的场景（见 tools/todo-gate.js 的 writeSucceeded）。
       for (const s of steps) {
         if (todoGate.isWriteTool(s.name) && todoGate.writeSucceeded(s.result)) wroteFilesThisRun++
+      }
+      // 收口闸门用：本次运行**成功**的校验命令次数。
+      // 只看 execute_command 的成功退出（exitCode=0）—— 命令本身跑挂了不算验证过。
+      // 命令文本取自身份判定时的 parsedArgs（guard 预判阶段已经解析好，这里不再解一次 JSON）。
+      for (const s of steps) {
+        if (s.name !== 'execute_command' || !s.parsedArgs) continue
+        if (!todoGate.isVerifyCommand(s.parsedArgs.command)) continue
+        if (todoGate.verifySucceeded(s.result)) verifyRunsThisRun++
       }
 
       // 结果按 tool_calls 原下标回填。并发执行但顺序必须稳定：tool 消息顺序若与
@@ -1892,4 +1909,4 @@ module.exports = {
   trackRepeatCall,
   repeatWarnText,
   repeatBlockText,
-}
+}
