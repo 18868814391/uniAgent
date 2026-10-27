@@ -40,6 +40,8 @@ const toolImages = require('./tool-images')
 const { looksLikeTextToolCall, parseTextToolCalls } = require('./text-tool-call')
 const agentsMd = require('./agents-md')
 const taskNotify = require('./task-notify')
+// 文件检查点（P0-7）：写盘工具调用它留原文，chat:done 里带"本轮可撤销几个文件"
+const checkpoints = require('./checkpoints')
 
 const { getActiveProfile, getApiBaseUrl, buildSystemPrompt } = settings
 const { estimateTokens, estimateMessagesTokens, getModelContextWindow, maybeCompactHistory } = context
@@ -205,6 +207,18 @@ function repeatBlockText(name, streak) {
     error: `重复调用被拦截：${name} 使用完全相同的参数已连续调用 ${streak + 1} 次。` +
       '相同输入不会产生不同结果 —— 请改用不同参数或其它工具；若信息已经够用，请直接给出最终回答。',
   })
+}
+
+/**
+ * 本轮的文件检查点概要（P0-7）→ 塞进 chat:done，UI 据此决定要不要显示「撤销本轮改动」。
+ * 任何异常都降级成 0：检查点是附加能力，不能让收尾流程挂掉。
+ */
+function checkpointInfo(convId, turnId) {
+  try {
+    return { turnId, files: checkpoints.turnFileCount(convId, turnId) }
+  } catch {
+    return { turnId, files: 0 }
+  }
 }
 
 /**
@@ -800,6 +814,8 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
       // 本轮一共从正文里还原并真正执行了多少个工具调用（网关间歇性不走原生 function calling）。
       // 渲染层目前不消费，留在事件里便于排查"模型是不是一直在吐文本"。
       textToolCallRepaired,
+      // 文件检查点（P0-7）：本轮存了几个可恢复的文件 → UI 据 files>0 显示「撤销本轮改动」
+      checkpoint: checkpointInfo(conversationId, turnStartIndex),
     })
     notifyRunEnd(reason)
   }
@@ -946,6 +962,11 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
       { role: 'system', content: systemContent },
       ...messages,
     ]
+    // 压缩过就清空「读状态」：那些文件原文已经不在上下文里了，模型只能凭摘要里的
+    // 旧记忆去覆盖 —— 正是 P0-5 要防的场景。清空后它必须重新 read_file 才能整篇覆盖。
+    if (compactedMessages) {
+      try { fsSafe.clearReadState() } catch { /* 清理失败不影响主流程 */ }
+    }
     // 本轮的起点 = 最后一条 user 消息（渲染层刚推入的那条）；压缩与否都成立
     turnStartIndex = currentMessages.length - 1
   }
@@ -1422,7 +1443,15 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
       // 工具上下文：所有工具统一携带（此前只有 ask_user / 子 Agent 两个分支才传）。
       // grep_code / glob_files 等长耗时工具靠 convId + event.sender 向渲染层播报进度，
       // 让"正在扫大仓库"这件事有可见反馈，而不是看起来像界面卡死。
-      const toolCtx = { event, controller, convId: conversationId, profileId }
+      const toolCtx = {
+        event,
+        controller,
+        convId: conversationId,
+        profileId,
+        // 轮次标识（= 本轮在 currentMessages 里的起点下标）：写盘工具据此把原文存进
+        // checkpoints，实现「撤销本轮改动」。子代理不传 → 不做检查点（它本来只读）。
+        turnId: turnStartIndex,
+      }
       // ------------------------------------------------------------
       //  工具执行编排（2026-09-30）：能并发的并发跑，必须串行的按原顺序跑
       //

@@ -198,6 +198,22 @@
         </div>
       </div>
 
+      <!-- 本轮覆盖/删除过已有文件：一键撤销本轮改动（写盘前的原文存在 userData/checkpoints） -->
+      <div v-if="store.checkpoint && !store.isStreaming" class="resume-banner">
+        <div class="resume-msg">本轮改了 {{ store.checkpoint.files }} 个已有文件，已自动留快照</div>
+        <div class="resume-detail">
+          改坏了可以回到本轮开始前的样子；只恢复本轮动过的文件，本轮新建的文件不在其中。
+        </div>
+        <div class="resume-actions">
+          <button
+            class="turn-issue-btn retry"
+            :disabled="store.checkpoint.restoring"
+            @click="store.restoreCheckpoint()"
+          >{{ store.checkpoint.restoring ? '正在恢复…' : '↩️ 撤销本轮改动' }}</button>
+          <button class="error-dismiss" @click="store.dismissCheckpoint()">✕</button>
+        </div>
+      </div>
+
       <!-- Processing indicator: always visible while AI is working -->
       <div v-if="store.isStreaming" class="processing-indicator">
         <span class="p-dot"></span>

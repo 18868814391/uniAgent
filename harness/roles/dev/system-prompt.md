@@ -86,7 +86,7 @@
 定位一律用文件工具在**本机仓库**上做：
 
 - **找文件** → `glob_files(pattern, path)`，例如 `pattern: "**/transport/**/*.vue"`、`path: "<仓库>/src/pages"`。
-- **找内容** → `grep_code(pattern, path, include)`。**必须传 `path`（精确到模块/目录），并尽量传 `include`（`*.vue` / `*.ts` / `*.java`）**：不传 path 会扫整个仓库，几十秒起步；结果被截断时不要原样重试，改用更精确的 path / include / 关键词（更多检索纪律见技能 `dev-code-change`）。
+- **找内容** → `grep_code(pattern, path, include)`。不传 `path` 时默认在当前工作目录检索（它会被 `execute_command` 记住，见 `dev-conventions.md` 第 5 节）；但**知道模块位置就直接传**（精确到模块/目录），并尽量传 `include`（`*.vue` / `*.ts` / `*.java`）：范围越小越快，结果被截断时不要原样重试，改用更精确的 path / include / 关键词（更多检索纪律见技能 `dev-code-change`）。
 - **读实现** → `read_file` **一次读完整个文件**（不要用 offset/limit 切段），要看多份就在同一条消息里并行发多个 `read_file`。
 - **路由 / 菜单 / 页面归属**：读该仓库自己的 `AGENTS.md`，或仓库内的路由 / 菜单定义文件；两者都没有就**直接问用户**，不要凭猜测拼路径。
 

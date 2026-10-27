@@ -68,6 +68,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   archiveConversation: (id, messages) => ipcRenderer.invoke('conversations:archive', id, messages),
   getConversationMessages: (id) => ipcRenderer.invoke('conversations:getMessages', id),
   saveConversationMessages: (id, messages, convMeta) => ipcRenderer.invoke('conversations:saveMessages', id, messages, convMeta),
+  // ========== 文件检查点（P0-7）==========
+  // 撤销某一轮的写盘：写盘前原文已存在 userData/checkpoints/<conv>/turn-<id>/ 下
+  listCheckpointTurns: (convId) => ipcRenderer.invoke('checkpoint:list', convId),
+  restoreCheckpoint: (convId, turnId) => ipcRenderer.invoke('checkpoint:restore', { convId, turnId }),
   onConversationsChanged: (callback) => {
     const handler = (_event, data) => callback(data)
     ipcRenderer.on('conversations:changed', handler)

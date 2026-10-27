@@ -296,6 +296,107 @@ function readFileSafe(filePath) {
 const READ_MAX_LINES = 8000        // 兜底：防病态超多行（正常源码文件不会碰到）
 const READ_MAX_CHARS = 128 * 1024  // 真正的闸：约 4 万 token（ASCII），足以一次读完大页面
 
+// ============================================================
+//  读状态登记（2026-10-24，P0-5）—— 覆盖已存在的文件前，先确认"读过没有 / 读后被改没有"
+//
+//  为什么要区分工具：
+//   · `write_file` 是**整篇重写**。模型如果基于旧印象（或根本没读过）覆盖，
+//     会静默回滚用户/其他人的中间改动 —— 这是唯一会真正丢东西的路径，必须拦住。
+//   · `edit_file` 每次**从磁盘重读**再在原文上做 str_replace，还有唯一性校验 + 行尾兜底
+//     （见下方 editFileSafe）。它天然不会被陈旧内容污染，所以这里只给一句 `staleRead` 提示，
+//     不做硬拦倒 —— 硬拦只会白烧一轮往返。
+//
+//  两个豁免：① AI 自己写出来的草稿（`cat > x.py` 生成的脚本没被读过，但那是它的产物）；
+//            ② 文件在检查瞬间消失（当新建处理）。
+//  ⚠️ 触发条件是「要求读」这个开关（opts.requireRead），只有 dev 角色的 write_file 会打开 ——
+//     其它角色（Excel/法务/测试）大量"写新文件 + 覆盖导出物"，不该被这条规则打扰。
+// ============================================================
+const readState = new Map()   // absPath -> { mtimeMs, size, fullRead, at }
+
+function markRead(resolved, fullRead) {
+  try {
+    const st = fs.statSync(resolved)
+    readState.set(resolved, { mtimeMs: st.mtimeMs, size: st.size, fullRead: !!fullRead, at: Date.now() })
+  } catch {
+    /* 记不上就算了：最坏结果是覆盖时多要求一次 read_file */
+  }
+}
+
+/** 写盘成功后刷新记录：同一次运行里连续改同一个文件，不该被判成"读后被改"。 */
+function markWritten(resolved) {
+  markRead(resolved, true)
+}
+
+/** 清空（上下文压缩后调用：模型已看不到那些原文，不该再凭摘要里的记忆去覆盖）。 */
+function clearReadState() {
+  readState.clear()
+}
+
+/**
+ * 覆盖前校验（只在 opts.requireRead 时调用）。
+ * 未读过 / 读后被改 → 抛错，让模型先 read_file 再动手。
+ */
+function assertReadBeforeOverwrite(resolved, displayPath) {
+  try {
+    if (aiCreated.isAiAuthored(resolved)) return
+  } catch {
+    /* 记账模块异常不阻断写盘 */
+  }
+  let st = null
+  try {
+    st = fs.statSync(resolved)
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return   // 刚被删掉 → 当新建处理
+    return
+  }
+  const rec = readState.get(resolved)
+  if (!rec) {
+    throw new Error(
+      `拒绝覆盖未读过的文件："${displayPath}" 已存在，但本次会话没有 read_file 读过它。`
+      + '请先 read_file 完整读一遍（确认里面有没有用户自己的改动），再决定是否整篇覆盖；'
+      + '只改局部请用 edit_file（它不会动其它部分）。',
+    )
+  }
+  if (!rec.fullRead) {
+    throw new Error(
+      `"${displayPath}" 只被读过片段（用了 offset/limit 或当时被截断）。整篇覆盖会把没读到的部分一起冲掉 —— `
+      + '请先用 read_file **不传 offset/limit** 完整读一遍，再决定是否覆盖。',
+    )
+  }
+  if (st.mtimeMs !== rec.mtimeMs || st.size !== rec.size) {
+    throw new Error(
+      `"${displayPath}" 在你读过之后被改动过（mtime/size 变了，可能是用户或格式化工具），`
+      + '整篇覆盖会连带覆盖掉那些改动。请重新 read_file 确认最新内容后再改。',
+    )
+  }
+}
+
+/** edit_file 用的软提示：不阻断，只告诉模型"你改的位置可能不是你以为的那份内容"。 */
+function staleReadInfo(resolved) {
+  try {
+    if (aiCreated.isAiAuthored(resolved)) return {}
+    const rec = readState.get(resolved)
+    if (!rec) {
+      return {
+        staleRead: true,
+        staleReadNote: '本次会话没有用 read_file 读过这个文件就直接编辑了。改动已落盘 —— '
+          + '若替换位置或上下文不对，请按错误提示重新定位，不要凭记忆重写整个文件。',
+      }
+    }
+    const st = fs.statSync(resolved)
+    if (st.mtimeMs !== rec.mtimeMs || st.size !== rec.size) {
+      return {
+        staleRead: true,
+        staleReadNote: '这个文件在你读过之后被改动过（mtime/size 变了）。改动已按当前磁盘内容落盘 —— '
+          + '如果结果和预期不一致，请重新 read_file 看最新内容。',
+      }
+    }
+    return {}
+  } catch {
+    return {}
+  }
+}
+
 /**
  * Read file with optional line range (for the read_file tool).
  * 返回：整份文件且未超限 → 裸字符串（与原行为完全一致）；
@@ -339,7 +440,10 @@ function readFileWithRange(filePath, offset, limit) {
   const truncated = end < totalLines || lineTruncated
 
   // 整份文件、未超限、调用方也没要分段 → 与旧行为逐字节一致（裸字符串）
-  if (!hasOffset && !hasLimit && !truncated) return content
+  if (!hasOffset && !hasLimit && !truncated) {
+    markRead(path.resolve(filePath), true)   // 完整读过 → 允许之后整篇覆盖
+    return content
+  }
 
   const result = {
     content: sliced,
@@ -358,6 +462,7 @@ function readFileWithRange(filePath, offset, limit) {
       + `单次上限 ${READ_MAX_LINES} 行 / ${READ_MAX_CHARS} 字符）。`
       + `请用 offset=${end + 1} 继续读取剩余部分，不要改用更小的 limit 反复试探。`
   }
+  markRead(path.resolve(filePath), false)   // 只读了片段 → 之后整篇覆盖仍会被拦
   return result
 }
 
@@ -541,7 +646,7 @@ function buildEditDiff(oldContent, newContent) {
   }
 }
 
-function writeFileSafe(filePath, content) {
+function writeFileSafe(filePath, content, opts = {}) {
   const resolved = path.resolve(filePath)
   if (!isPathAllowed(resolved, true)) {
     throw new Error(`Access denied: "${filePath}" is not in the allowed directories list.`)
@@ -552,6 +657,8 @@ function writeFileSafe(filePath, content) {
   }
   // 覆写前先留一份原文用于生成 diff（新建文件时基准为空串）
   const existed = fs.existsSync(resolved)
+  // 覆盖已存在的文件前：dev 角色要求"读过、且读后没被别人改过"（见上方 readState 段）
+  if (existed && opts.requireRead) assertReadBeforeOverwrite(resolved, filePath)
   let prev = ''
   if (existed) {
     try {
@@ -561,6 +668,7 @@ function writeFileSafe(filePath, content) {
     }
   }
   fs.writeFileSync(resolved, content, 'utf-8')
+  markWritten(resolved)
   // 记账：AI 新建的文件（或已在册的 AI 文件被再次写入）→ 之后删它 / 覆盖它不弹确认框
   noteAiWrite(resolved, !existed)
   const result = { path: resolved, size: Buffer.byteLength(content, 'utf-8') }
@@ -673,6 +781,8 @@ function editFileSafe(filePath, oldString, newString, replaceAll = false) {
     throw new Error(`File too large (max 10MB): "${filePath}"`)
   }
   const content = fs.readFileSync(resolved, 'utf-8')
+  // 软提示：没读过 / 读后被改过 → 结果里带 staleRead（不阻断，本函数在磁盘原文上替换）
+  const readInfo = staleReadInfo(resolved)
 
   // 空 old_string 会让下面的扫描永不前进（indexOf('', n) 恒返回 n）→ 主线程死循环、整窗冻死。
   // schema 层已加 .min(1)，这里再兜一次：任何调用路径（含未来新增的内部调用）都不至于冻住进程。
@@ -702,8 +812,9 @@ function editFileSafe(filePath, oldString, newString, replaceAll = false) {
       ? content.split(oldString).join(newString)
       : content.replace(oldString, () => newString)
     fs.writeFileSync(resolved, newContent, 'utf-8')
+    markWritten(resolved)
     noteAiWrite(resolved, false) // 已是 AI 的草稿 → 刷新记账；用户自己的文件不会被记上
-    const exact = { path: resolved, replacedCount: replaceAll ? count : 1, size: Buffer.byteLength(newContent, 'utf-8') }
+    const exact = { path: resolved, replacedCount: replaceAll ? count : 1, size: Buffer.byteLength(newContent, 'utf-8'), ...readInfo }
     // 回显这次到底改成了什么（模型自查用）；内容无变化时 diff 为 null，不加字段
     const d = buildEditDiff(content, newContent)
     if (d) {
@@ -730,6 +841,7 @@ function editFileSafe(filePath, oldString, newString, replaceAll = false) {
       newContent = replaceLinesAt(content, lineHits[0], lineCount, newString)
     }
     fs.writeFileSync(resolved, newContent, 'utf-8')
+    markWritten(resolved)
     noteAiWrite(resolved, false)
     const eolResult = {
       path: resolved,
@@ -737,6 +849,7 @@ function editFileSafe(filePath, oldString, newString, replaceAll = false) {
       eolAdjusted: true,
       note: '精确匹配未命中，已按「忽略行尾差异」的方式完成替换（文件原有行尾风格保持不变）。',
       size: Buffer.byteLength(newContent, 'utf-8'),
+      ...readInfo,
     }
     const d = buildEditDiff(content, newContent)
     if (d) {
@@ -798,6 +911,7 @@ function deleteFileSafe(filePath) {
     return { deleted: false, reason: 'not_found' }
   }
   fs.unlinkSync(resolved)
+  readState.delete(resolved)   // 删掉之后同名文件再出现，必须重新读过才算"读过"
   forgetAiWrite(resolved) // 撤账：同名文件以后再出现，不该被当成「AI 的草稿」
   return { deleted: true }
 }
@@ -1185,6 +1299,8 @@ module.exports = {
   editFileSafe,
   listDirSafe,
   deleteFileSafe,
+  // 读状态（P0-5）：压缩后清空，避免模型凭摘要里的旧记忆覆盖文件
+  clearReadState,
   imageMimeForPath,
   imagePartFromBuffer,
   // 本机图片文件 → image_url part（read_image 工具用；含白名单校验、10MB 上限、降采样）

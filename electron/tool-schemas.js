@@ -235,9 +235,13 @@ const TOOLS = [
   {
     name: 'execute_command',
     description:
-      "Execute a shell command on the user's computer (via bash). Use this to run scripts, install packages, start servers, or perform any command-line task. The command runs in the user's home directory with a 300-second (5-minute) timeout. Long output is auto-truncated to head+tail (8 KB each) and the FULL output is saved to a local log file: when the result has stdoutTruncated:true, grep that stdoutPath file for the interesting lines (error / failed / FAIL) instead of re-running the command — never conclude 'build/test passed' from a truncated tail. Do NOT run whole-project type checks (vue-tsc --noEmit / tsc --noEmit) or full production builds as a verification step: they take minutes on large projects and the user runs them at packaging time. For self-check, use eslint + syntax/compile checks on the changed files only.",
+      "Execute a shell command on the user's computer (via bash). Use this to run scripts, install packages, start servers, or perform any command-line task. The command runs in the CURRENT working directory — which persists between commands in the dev role — with a 300-second (5-minute) timeout. Do NOT prepend `cd <repo> &&` on every call: once you have cd'ed (or passed cwd), later commands start there. Pass `cwd` when you need to switch to another repo for one command. Long output is auto-truncated to head+tail (8 KB each) and the FULL output is saved to a local log file: when the result has stdoutTruncated:true, grep that stdoutPath file for the interesting lines (error / failed / FAIL) instead of re-running the command — never conclude 'build/test passed' from a truncated tail. Do NOT run whole-project type checks (vue-tsc --noEmit / tsc --noEmit) or full production builds as a verification step: they take minutes on large projects and the user runs them at packaging time. For self-check, use eslint + syntax/compile checks on the changed files only.",
     schema: z.object({
       command: z.string().describe('The shell command to execute'),
+      cwd: z
+        .string()
+        .optional()
+        .describe('Absolute directory to run this command in (defaults to the session working directory, which is remembered between calls). Use it instead of prefixing `cd <dir> &&`.'),
     }),
   },
   {

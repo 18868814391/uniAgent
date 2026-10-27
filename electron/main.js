@@ -271,6 +271,8 @@ app.whenReady().then(() => {
   conversations.registerIpc()
   fsSafe.registerIpc()
   chat.registerIpc()
+  // 文件检查点（P0-7）：撤销本轮改动
+  require('./checkpoints').registerIpc()
   // 网络健康探测：周期性对当前活动端点做轻量连通检查，结论推给右上角状态点
   netHealth.registerIpc()
 

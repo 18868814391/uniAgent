@@ -22,6 +22,7 @@ const agentsMd = require('../agents-md')
 const todo = require('./todo')
 const subagentPolicy = require('./subagent-policy')
 const quickDiag = require('./quick-diag')
+const checkpoints = require('../checkpoints')
 const { legalNpcSearch } = require('./legal-npc-search')
 const { downloadUrl } = require('./download')
 const { handleSpawnSubAgent, handleGetSubAgentResults } = require('../sub-agent')
@@ -119,11 +120,16 @@ const TOOL_HANDLERS = {
   // 而全项目 typecheck / build 是被明令禁止的（几分钟），模型于是只跑"改动文件的 eslint"，
   // 语法错误一路漏到用户打包时才炸。quick-diag 只跑单文件秒级检查，
   // 有错才附 diagnostics 字段，干净时不加任何字段（省 token）；失败一律静默降级。
-  write_file: async ({ path, content }) => {
-    const res = fsSafe.writeFileSafe(path, content)
+  write_file: async ({ path, content }, ctx) => {
+    // 覆盖已有文件前要求「本次会话读过 + 读后没被改动过」（P0-5，见 fs-safe 的 readState 段）
+    const requireRead = !!(state.settings && state.settings.role === 'dev')
+    // 写盘前留检查点（P0-7）：改坏了可以「撤销本轮改动」
+    checkpoints.snapshotBeforeWrite(ctx && ctx.convId, ctx && ctx.turnId, path)
+    const res = fsSafe.writeFileSafe(path, content, { requireRead })
     return JSON.stringify({ success: true, result: await quickDiag.attachDiagnostics(res, res && res.path ? res.path : path) })
   },
-  edit_file: async ({ path, old_string, new_string, replace_all }) => {
+  edit_file: async ({ path, old_string, new_string, replace_all }, ctx) => {
+    checkpoints.snapshotBeforeWrite(ctx && ctx.convId, ctx && ctx.turnId, path)
     const res = fsSafe.editFileSafe(path, old_string, new_string, replace_all)
     return JSON.stringify({ success: true, result: await quickDiag.attachDiagnostics(res, res && res.path ? res.path : path) })
   },
@@ -132,7 +138,11 @@ const TOOL_HANDLERS = {
   grep_code: (args, ctx) => grepCode(args, ctx && ctx.onProgress),
   glob_files: (args, ctx) => globFiles(args, ctx && ctx.onProgress),
   list_directory: ({ path }) => JSON.stringify({ success: true, result: fsSafe.listDirSafe(path) }),
-  delete_file: ({ path }) => JSON.stringify({ success: true, result: fsSafe.deleteFileSafe(path) }),
+  delete_file: ({ path }, ctx) => {
+    // 删除同理：先把原文存进检查点，撤销时能恢复（P0-7）
+    checkpoints.snapshotBeforeWrite(ctx && ctx.convId, ctx && ctx.turnId, path)
+    return JSON.stringify({ success: true, result: fsSafe.deleteFileSafe(path) })
+  },
   // 任务清单：整表覆盖写入当前会话。清单本身由 chat.js 在每轮请求末尾追加回显给模型
   // （见 tools/todo.js 头部）。校验失败返回结构化错误让模型自纠错，而不是 throw。
   // ⚠️ ctx.subAgent 必须硬拒绝：子代理沿用主会话的 convId，放它进来会覆盖主 Agent 的清单
@@ -173,7 +183,7 @@ const TOOL_HANDLERS = {
       note: results.length === 0 ? '没有找到匹配的历史会话，可换一个更精确的关键词再搜。' : `共命中 ${results.length} 个历史会话，已按最近更新排序。`,
     })
   },
-  execute_command: ({ command }) => executeCommand(command),
+  execute_command: ({ command, cwd }) => executeCommand(command, { cwd }),
   browser_open: async ({ url, timeoutMs }) => JSON.stringify({ success: true, result: await browserTest.openBrowser(url, timeoutMs) }),
   browser_click: async ({ selector, timeoutMs }) => JSON.stringify({ success: true, result: await browserTest.click(selector, timeoutMs) }),
   browser_type: async ({ selector, text }) => JSON.stringify({ success: true, result: await browserTest.type(selector, text) }),

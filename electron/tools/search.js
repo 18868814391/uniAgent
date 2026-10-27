@@ -14,6 +14,8 @@ const path = require('path')
 const fs = require('fs')
 const state = require('../state')
 const { isPathAllowed } = require('./fs-safe')
+// 工作目录锚点（dev 角色）：不传 path 时默认在这里检索，而不是"第一个授权目录"
+const cwdAnchor = require('../cwd-anchor')
 
 // 递归遍历时跳过的目录（构建产物 / 依赖 / 缓存不值得搜）
 const SKIP_DIRS = new Set([
@@ -129,8 +131,9 @@ async function grepCode(args = {}, onProgress) {
   // 确定搜索目录
   let dir = searchPath
   if (!dir) {
-    const allowed = state.settings.allowedDirs || []
-    dir = allowed[0]
+    // dev 角色的工作目录锚点（cwd-anchor.js）：跑过一次命令后，检索默认落在那个仓库里，
+    // 不必每次写全路径。非 dev 角色 peek() 恒为 null → 与旧行为完全一致。
+    dir = cwdAnchor.peek() || (state.settings.allowedDirs || [])[0]
   }
   if (!dir) {
     return JSON.stringify({ success: false, error: '未指定搜索目录，且未配置授权目录。请在设置中添加授权目录，或在参数中指定 path。' })
@@ -328,8 +331,8 @@ async function globFiles(args = {}, onProgress) {
     if (dirParts.length > 0) {
       dir = dirParts.join('/')
     } else {
-      const allowed = state.settings.allowedDirs || []
-      dir = allowed[0]
+      // 同 grepCode：dev 有工作目录锚点就优先用它
+      dir = cwdAnchor.peek() || (state.settings.allowedDirs || [])[0]
     }
     // 如果有目录前缀，glob 模式去掉目录部分
     if (globStart > 0) {

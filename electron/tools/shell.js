@@ -15,6 +15,8 @@ const fs = require('fs')
 const os = require('os')
 const crypto = require('crypto')
 const { execFile } = require('child_process')
+// 工作目录锚点（dev 角色）：纯模块，不 require electron，也不会造成循环依赖
+const cwdAnchor = require('../cwd-anchor')
 
 // ---- 子进程跟踪表：pid → child（防止 Python 等脚本执行完后变孤儿进程） ----
 const activeChildren = new Map() // pid → { child, startedAt, command }
@@ -201,22 +203,105 @@ function noteAiOutput(file) {
   }
 }
 
-async function executeCommand(command) {
+// ------------------------------------------------------------
+//  工作目录锚点（2026-10-24，P0-6）
+//
+//  旧行为：每条命令都从 os.homedir() 起，模型必须自己拼 `cd /d/proj && ...`。
+//  现在（仅 dev 角色）：以锚点为起始目录；跑完用 `pwd -P` 把**最终**目录回写，
+//  于是「cd 一次，后面都记住」，与 Claude Code 的 "working directory persists" 对齐。
+//
+//  三条硬约束：
+//   ① 记录动作**不能**影响命令结果 —— 任何异常一律吞掉，探针文件读不到就当没发生；
+//   ② 退出码语义不变 —— 用 $? 暂存后 `exit`，不让追加的两行改变调用方看到的 code；
+//   ③ 超时/被杀时通常拿不到探针 → 保持原锚点，不猜。
+// ------------------------------------------------------------
+
+/** 起始目录：显式 cwd（存在且是目录）> 锚点 > 主目录。 */
+function resolveBaseCwd(explicit) {
+  if (typeof explicit === 'string' && explicit.trim()) {
+    try {
+      const abs = path.resolve(explicit.trim())
+      if (fs.statSync(abs).isDirectory()) return abs
+    } catch {
+      /* 传了不存在的目录 → 退回锚点 */
+    }
+  }
+  return cwdAnchor.get()
+}
+
+/** Windows 路径 → bash 认识的 POSIX 路径（`D:\a\b` → `/d/a/b`）。 */
+function toPosixPath(p) {
+  const s = String(p || '')
+  const m = /^([a-zA-Z]):[\\/](.*)$/.exec(s)
+  if (m) return `/${m[1].toLowerCase()}/${m[2].replace(/\\/g, '/')}`
+  return s.replace(/\\/g, '/')
+}
+
+/** `pwd -P` 的输出（POSIX）→ Windows 路径。 */
+function fromPosixPath(p) {
+  const s = String(p || '').trim()
+  const m = /^\/([a-zA-Z])\//.exec(s)
+  if (m) return `${m[1].toUpperCase()}:\\${s.slice(3).replace(/\//g, '\\')}`
+  return s
+}
+
+/** 建一个探针文件路径（临时目录，跑完读取后删除）。失败返回 null = 不记录 cwd。 */
+function makeCwdProbe() {
+  try {
+    const file = path.join(os.tmpdir(), `localai-cwd-${process.pid}-${crypto.randomBytes(4).toString('hex')}.txt`)
+    return { file, posix: toPosixPath(file) }
+  } catch {
+    return null
+  }
+}
+
+/** 读探针 → 回写锚点。任何异常都吞掉：记录失败绝不改变命令结果。 */
+function recordCwdFromProbe(probe) {
+  if (!probe) return
+  try {
+    if (!fs.existsSync(probe.file)) return
+    const raw = fs.readFileSync(probe.file, 'utf-8').trim()
+    try { fs.unlinkSync(probe.file) } catch { /* ignore */ }
+    if (!raw) return
+    const dir = fromPosixPath(raw)
+    if (!dir || !fs.statSync(dir).isDirectory()) return
+    cwdAnchor.set(dir)
+  } catch {
+    /* 探测失败 = 保持原锚点 */
+  }
+}
+
+async function executeCommand(command, opts = {}) {
   const timeoutMs = 300_000
+  // 起始目录：显式 cwd（存在且是目录）> 锚点 > 主目录（旧行为）
+  const baseCwd = resolveBaseCwd(opts.cwd)
 
   // 执行前先算出「命令要写、且当前还不存在」的文件（执行后再逐个 stat 落账）。
   // 只认执行前不存在的 —— 用户已有的文件被重定向覆盖，不该因此变成「AI 的草稿」。
+  // ⚠️ 基准目录必须与真正起 bash 的 cwd 一致（旧版硬编码 os.homedir()，加了锚点后会算错）。
   let freshOutputs = []
   try {
-    freshOutputs = parseOutputTargets(command, os.homedir()).filter((p) => !fs.existsSync(p))
+    freshOutputs = parseOutputTargets(command, baseCwd).filter((p) => !fs.existsSync(p))
   } catch {
     freshOutputs = []
   }
 
+  // 命令末尾追加「记录最终工作目录」，跑完回写锚点 —— 这是「cd 一次，后面都记住」的实现。
+  // 用 $? 暂存退出码保证退出码语义不变；只读 pwd，不改变任何输出。
+  const probe = makeCwdProbe()
+  const script = probe && !/\\$/.test(String(command).trimEnd())
+    ? [
+      command,
+      '__localai_rc=$?',
+      `pwd -P >| "${probe.posix}" 2>/dev/null`,
+      'exit $__localai_rc',
+    ].join('\n')
+    : command
+
   return new Promise((resolve) => {
     // Run via Git Bash on Windows, or sh on other platforms
     const shellPath = resolveShellPath()
-    const shellArgs = ['-c', command]
+    const shellArgs = ['-c', script]
 
     let settled = false
     let timer = null
@@ -236,7 +321,7 @@ async function executeCommand(command) {
     try {
       child = execFile(shellPath, shellArgs, {
         maxBuffer: EXEC_MAX_BUFFER,
-        cwd: os.homedir(),
+        cwd: baseCwd,
       }, (err, stdout, stderr) => {
         if (timer) {
           clearTimeout(timer)
@@ -309,6 +394,8 @@ async function executeCommand(command) {
             /* ignore */
           }
         }
+        // 回写工作目录锚点（仅 dev 生效；探测不到就保持原值）
+        recordCwdFromProbe(probe)
         finish(payload)
       })
 

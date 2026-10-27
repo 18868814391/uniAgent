@@ -115,6 +115,27 @@ C:/Users/syf/.workbuddy/binaries/node/versions/22.22.2-3/node.exe --check <文�
   （改 `.md` / 配置不需要跑校验，挂在写盘上会变成噪音）。改动前跑 `tests/todo-gate.test.js`
   与 `tests/todo-final-gate.test.js`（后者是端到端接线测试，用 stub 跑完整 chat 循环）。
 
+## 工作目录、读状态与文件检查点（2026-10-24，改之前必读）
+
+三件事都随企业版 f7c52ad 同步而来。开源版 `settings.role` 恒为 `'dev'`（见「角色机制」），
+所以代码里的 `role === 'dev'` 判断**恒为真**、这几项能力对本版全局生效 ——
+**但这不代表角色机制回来了**：那是历史写法，不是新引入的分支。
+
+- **工作目录锚点 `electron/cwd-anchor.js`**：`execute_command` 以锚点为起始目录，跑完用
+  `pwd -P` 回写（`shell.js` 的 `recordCwdFromProbe`）；`grep_code` / `glob_files` 不传 `path`
+  时默认它就是搜索根。所以文档里不再要求「每条命令先 cd」。改这块注意三件事：
+  ① 记录动作必须吞掉所有异常（不能改变命令结果）；② 退出码要用 `$?` 暂存后 `exit`；
+  ③ `guard.js` 的 `baseCwdForCommand` 必须用同一个锚点，否则相对路径会判到错的地方。
+- **读状态 `fs-safe.js` 的 readState 段**：`write_file` 覆盖已存在文件前要求「本次会话完整读过 +
+  读后没被改动过」（未读过 / 只读片段 / mtime 变了 → 拒绝）；`edit_file` 只加 `staleRead` 提示
+  不阻断（它每次从磁盘重读，不会被陈旧内容污染）。开关是 `writeFileSafe(..., {requireRead})`，
+  只有 `write_file` handler 打开它。⚠️ 上下文压缩后必须 `clearReadState()`。
+- **文件检查点 `electron/checkpoints.js`**：写盘/删除前把原文复制到
+  `userData/checkpoints/<convHash>/turn-<id>/`，`chat:done` 带 `checkpoint.files > 0` 时
+  界面出现「撤销本轮改动」。同一轮同一文件只存第一次（撤销要回到这一轮开始前）；
+  `AppData` / `.ssh` 等敏感目录与大文件、二进制不落副本。会话删除时 `clearSession`。
+  对应测试：`tests/read-state.test.js` / `tests/cwd-anchor.test.js` / `tests/checkpoints.test.js`。
+
 ## 测试
 
 `tests/` 下是 node 直跑的单测（`node tests/xxx.test.js`）。判定失败归属的标准动作：

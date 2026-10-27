@@ -35,6 +35,8 @@ const os = require('os')
 const { execFileSync } = require('child_process')
 // 同目录、只依赖 fs/path 的小模块（不是「项目内模块」），不会带来循环依赖
 const aiCreated = require('./ai-created')
+// 工作目录锚点：与 shell.js 起 bash 的 cwd 同源，否则相对路径会判定到错的地方
+const cwdAnchor = require('../cwd-anchor')
 
 const IS_WIN = process.platform === 'win32'
 
@@ -411,18 +413,20 @@ function resolveCommandPath(raw, cwd) {
   return path.resolve(cwd, t)
 }
 
-// shell.js 实际用 cwd: os.homedir() 起 bash，但 AI 的命令通常自带 `cd <项目>`。
-// 以命令里第一个能落地的 cd 目标为基准 —— 判错只会导致多弹一次框（保守侧）。
+// shell.js 用「锚点目录」起 bash（dev 角色；见 electron/cwd-anchor.js），
+// AI 的命令也常自带 `cd <项目>`。以命令里第一个能落地的 cd 目标为基准；
+// 没有 cd 就用锚点本身 —— 判错只会导致多弹一次框（保守侧）。
 function baseCwdForCommand(cmd) {
+  const anchor = cwdAnchor.get()
   for (const seg of splitSubCommands(cmd)) {
     const cd = cdTarget(seg)
     if (!cd) continue
-    const r = resolveCommandPath(cd, os.homedir())
+    const r = resolveCommandPath(cd, anchor)
     try {
       if (r && fs.existsSync(r) && fs.statSync(r).isDirectory()) return r
     } catch { /* 认不出来就试下一个 */ }
   }
-  return os.homedir()
+  return anchor
 }
 
 function rmPathsAreAiDrafts(cmd) {

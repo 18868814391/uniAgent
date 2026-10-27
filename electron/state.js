@@ -33,4 +33,7 @@ module.exports = {
   // git 可执行文件探测结果缓存
   cachedGitCmd: null,
   gitProbeDone: false,
+  // 开发角色的「当前工作目录」锚点（见 cwd-anchor.js）：execute_command 跑完用 pwd -P 回写，
+  // grep_code / glob_files 不传 path 时以它为默认目录。其它角色恒为 null（行为不变）。
+  devCwd: null,
 }

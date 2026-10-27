@@ -198,6 +198,9 @@ export const useAppStore = defineStore('app', () => {
       resumeOffer: false,
       // 本次「继续」真的命中了快照（回放了上一轮的工具结果）时的提示 { executed, interrupted }
       resumedInfo: null,
+      // 文件检查点（P0-7）：本轮存了可恢复的文件 → { turnId, files, restoring }；
+      // 有值时界面上给一个「撤销本轮改动」入口。新一轮开始即失效。
+      checkpoint: null,
       askUser: null,            // 当前 AI 提问卡片（ask_user）：{ id, question, options }，null 表示无
       cleanups: [],             // 本会话流式监听的清理函数（停止/删除时逐个释放，不影响其他会话）
       subAgents: [],            // 子 Agent 状态列表 [{ subAgentId, task, description, status, startedAt, completedAt }]
@@ -240,6 +243,7 @@ export const useAppStore = defineStore('app', () => {
   // 断点续跑相关的两个视图状态（跟随当前查看的会话）
   const resumeOffer = computed(() => currentState.value.resumeOffer)
   const resumedInfo = computed(() => currentState.value.resumedInfo)
+  const checkpoint = computed(() => currentState.value.checkpoint)
   const askUser = computed(() => currentState.value.askUser)
   const estSpeed = computed(() => currentState.value.estSpeed)
   const streamSpeed = computed(() => currentState.value.streamSpeed)
@@ -730,6 +734,35 @@ export const useAppStore = defineStore('app', () => {
     currentState.value.resumeOffer = false
   }
 
+  // ========== 文件检查点：撤销本轮改动（P0-7） ==========
+  function dismissCheckpoint() {
+    currentState.value.checkpoint = null
+  }
+
+  async function restoreCheckpoint() {
+    const st = currentState.value
+    const cp = st.checkpoint
+    const cid = currentConvId.value
+    if (!cp || !cid || cp.restoring) return
+    if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+      if (!window.confirm(`确定把本轮改过的 ${cp.files} 个文件恢复成改动前的样子吗？本轮之后的手动修改也会被覆盖。`)) return
+    }
+    cp.restoring = true
+    try {
+      const res = await window.electronAPI.restoreCheckpoint(cid, cp.turnId)
+      if (res && res.ok) {
+        st.statusMessage = `已撤销本轮改动：${res.restored.length} 个文件已恢复`
+        st.checkpoint = null
+      } else {
+        st.error = (res && res.reason) || '撤销失败：没有可恢复的文件'
+        cp.restoring = false
+      }
+    } catch (e) {
+      st.error = '撤销失败：' + ((e && e.message) || e)
+      cp.restoring = false
+    }
+  }
+
   function buildTurnIssue(endReason, detail) {
     const reasons = {
       timeout: '网络连接超时：超过 180 秒没有收到 AI 的数据，连接可能已断开',
@@ -870,6 +903,8 @@ export const useAppStore = defineStore('app', () => {
     // 新一轮开始：上一轮的「可续跑」提示与「已接续」提示都作废（真命中了会有 chat:status 回来）
     st.resumeOffer = false
     st.resumedInfo = null
+    // 「撤销本轮改动」同理：新任务开始后，上一轮的检查点不再对应当前这轮
+    if (!resumeTurn) st.checkpoint = null
     st.askUser = null
     st.isSearching = false
     // 重置流式速度追踪
@@ -1140,6 +1175,10 @@ export const useAppStore = defineStore('app', () => {
       } else {
         st.resumeOffer = false
       }
+      // 文件检查点（P0-7）：本轮覆盖/删除过已存在的文件才有值（新建文件没有原文可恢复）。
+      // 有值 → 界面显示「撤销本轮改动」，点一下把这一轮改过的文件恢复原样。
+      const cp = data && data.checkpoint
+      st.checkpoint = cp && cp.files > 0 ? { turnId: cp.turnId, files: cp.files, restoring: false } : null
       // 会话已被删除则跳过落盘，避免把结果写回已删除会话
       if (convStates.has(convId)) {
         await saveConversationToDisk(convId, st)
@@ -1309,6 +1348,9 @@ export const useAppStore = defineStore('app', () => {
     turnIssue,
     resumeOffer,
     resumedInfo,
+    checkpoint,
+    dismissCheckpoint,
+    restoreCheckpoint,
     estSpeed,
     streamSpeed,
     subAgents,

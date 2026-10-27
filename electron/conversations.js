@@ -16,6 +16,7 @@ const { clearTurnSnapshot } = require('./turn-snapshot')
 // 会话删除 / 过期清理时日志与 spill 落盘目录一并清掉（见各 cleanup）。
 const sessionLog = require('./session-log')
 const spill = require('./spill')
+const checkpoints = require('./checkpoints')
 const { clearTodos } = require('./tools/todo')
 
 // 粘贴/拖拽图片（data URL 落盘）的两个常量。
@@ -115,6 +116,7 @@ function cleanupExpiredConversations() {
       clearTurnSnapshot(conv.id)   // 以及中断续跑快照，避免留下孤儿文件
       sessionLog.clearLog(conv.id) // 以及会话日志（完整消息序列）
       spill.clearSession(conv.id)  // 以及该会话 spill 落盘的超大工具结果
+      checkpoints.clearSession(conv.id) // 以及文件检查点（撤销本轮用的原文副本）
       cleanupPastedImages(conv.id) // 以及粘贴进来的图片
     }
   }
@@ -415,6 +417,7 @@ function registerIpc() {
     clearTurnSnapshot(id)   // 同步清理中断续跑快照
     sessionLog.clearLog(id) // 同步清理会话日志（完整消息序列）
     spill.clearSession(id)  // 同步清理该会话 spill 落盘的超大工具结果
+    checkpoints.clearSession(id) // 同步清理文件检查点
     clearTodos(id)          // 同步清理任务清单（update_todos）
     cleanupPastedImages(id) // 同步清理粘贴进来的图片
     return { success: true }
