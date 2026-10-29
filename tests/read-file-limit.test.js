@@ -57,12 +57,16 @@ function tmpFile(name, content) {
   return p
 }
 
-test('小文件不传 offset/limit → 仍返回裸字符串（原行为不变）', () => {
+test('小文件不传 offset/limit → 仍返回裸字符串，且默认带行号（2026-10-24 起）', () => {
   const src = 'line1\nline2\nline3\n'
   const f = tmpFile('small.js', src)
   const r = fsSafe.readFileWithRange(f, undefined, undefined)
   assert.equal(typeof r, 'string', '未超限且未分段时必须仍返回裸字符串（否则下游 JSON 包装与快照都会变）')
-  assert.equal(r, src)
+  assert.equal(r, '1\tline1\n2\tline2\n3\tline3\n4\t', '默认加「行号\\t」前缀，与 grep 的 file:line 口径一致')
+
+  // 需要原样文本（整段拷贝）时可关掉行号
+  const raw = fsSafe.readFileWithRange(f, undefined, undefined, { lineNumbers: false })
+  assert.equal(raw, src)
 })
 
 test('⚠️ 正常大页面必须整份返回（2000 行上限曾把 1796 行的 Vue 页面判成"需续读"）', () => {
@@ -123,7 +127,8 @@ test('从 nextOffset 续读可以把剩余部分读完（拼起来等于原文�
   let cursor = undefined
   const all = []
   for (let guard = 0; guard < 10; guard++) {
-    const seg = fsSafe.readFileWithRange(f, cursor, undefined)
+    // lineNumbers:false —— 这条用例验的是"续读能否覆盖全文"，行号会干扰逐行比对
+    const seg = fsSafe.readFileWithRange(f, cursor, undefined, { lineNumbers: false })
     const content = typeof seg === 'string' ? seg : seg.content
     all.push(...content.split('\n'))
     if (typeof seg === 'string' || !seg.truncated) break
@@ -166,10 +171,17 @@ test('正常分段读取的元信息仍然正确', () => {
   const lines = []
   for (let i = 1; i <= 100; i++) lines.push(`row ${i}`)
   const f = tmpFile('range.js', lines.join('\n'))
-  const r = fsSafe.readFileWithRange(f, 11, 5)
+  const r = fsSafe.readFileWithRange(f, 11, 5, { lineNumbers: false })
   assert.equal(r.offset, 11)
   assert.equal(r.limit, 5)
   assert.equal(r.truncated, true, '第 11-15 行之后还有内容 → 仍标 truncated（语义是"没读完"）')
   assert.deepEqual(r.content.split('\n'), ['row 11', 'row 12', 'row 13', 'row 14', 'row 15'])
   assert.equal(r.totalLines, 100)
+
+  // 带行号时编号必须从 offset 起，不能从 1 重来（否则模型按行号定位会全错）
+  const numbered = fsSafe.readFileWithRange(f, 11, 5)
+  assert.equal(numbered.lineNumbers, true)
+  assert.deepEqual(numbered.content.split('\n'), [
+    '11\trow 11', '12\trow 12', '13\trow 13', '14\trow 14', '15\trow 15',
+  ])
 })

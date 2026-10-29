@@ -110,8 +110,37 @@ function checkSubAgentCommand(command) {
   }
 
   if (bin === 'git') {
-    const sub = (tokens[1] || '').toLowerCase()
-    if (!sub) return { ok: false, reason: '只读模式下 git 必须带子命令，例如 `git log`。' }
+    // ⚠️ 2026-10-24 修：子命令不能直接取 tokens[1] —— `git -C <仓库> log` 的 tokens[1] 是 `-C`，
+    // 会被判成"不允许 git -C"，于是子代理完全无法在指定仓库里执行 git（它又不能用 cd，
+    // 没有 -C 就只能对着主目录报 "not a git repository"）。先跳过全局选项再找子命令。
+    let i = 1
+    while (i < tokens.length) {
+      const t = tokens[i].toLowerCase()
+      // 带值的全局选项：-C <path> / -c k=v / --git-dir <dir> / --work-tree <dir> / --namespace <name>
+      // （-C 与 -c 小写后同形，两者都吃一个值，跳过 2 个 token 都对）
+      if (t === '-c' || t === '--git-dir' || t === '--work-tree' || t === '--namespace') {
+        const val = tokens[i + 1] || ''
+        i += 2
+        // 带空格的路径会被 split 成多段：`-C "C:/my repo"` → 跳过的值只吃掉前半截，
+        // 这里把引号内的剩余片段一并跳过，否则会把路径尾段当成子命令拒掉。
+        const quote = /^["']/.exec(val)
+        if (quote) {
+          const closer = quote[0]
+          while (i < tokens.length && !tokens[i - 1].endsWith(closer)) i += 1
+        }
+        continue
+      }
+      // 不带值 / 用 = 赋值的全局选项
+      if (t === '--no-pager' || t === '--paginate' || t === '-p' || t === '--bare' || t === '--no-optional-locks'
+        || t === '--literal-pathspecs' || t.startsWith('--git-dir=') || t.startsWith('--work-tree=')
+        || t.startsWith('--namespace=')) {
+        i += 1
+        continue
+      }
+      break
+    }
+    const sub = (tokens[i] || '').toLowerCase()
+    if (!sub) return { ok: false, reason: '只读模式下 git 必须带子命令，例如 `git -C <仓库> log`。' }
     if (!GIT_READONLY_SUBCOMMANDS.has(sub)) {
       return {
         ok: false,

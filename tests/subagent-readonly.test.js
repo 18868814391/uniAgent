@@ -38,6 +38,12 @@ test('只读命令白名单：ls / cat / grep / git log 等放行', () => {
     'git diff HEAD~1',
     'git show HEAD',
     'git ls-files',
+    // 2026-10-24：子代理不能 cd，只能用 -C 指定仓库；全局选项必须能被正确跳过
+    'git -C C:/work/proj log --oneline -20',
+    'git -C /c/work/proj status',
+    'git -c core.pager=cat diff HEAD~1',
+    'git --no-pager -C "C:/work/my proj" log',
+    'git --git-dir=C:/work/proj/.git log --oneline',
   ]
   for (const cmd of ok) {
     const r = policy.checkSubAgentCommand(cmd)

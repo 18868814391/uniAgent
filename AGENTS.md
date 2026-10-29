@@ -136,6 +136,33 @@ C:/Users/syf/.workbuddy/binaries/node/versions/22.22.2-3/node.exe --check <文�
   `AppData` / `.ssh` 等敏感目录与大文件、二进制不落副本。会话删除时 `clearSession`。
   对应测试：`tests/read-state.test.js` / `tests/cwd-anchor.test.js` / `tests/checkpoints.test.js`。
 
+## 检索、编码、行号与自动 lint（2026-10-24 晚，从企业版 16cbf77 同步）
+
+- **grep 优先走 ripgrep**（`tools/search.js`）：探测顺序 `RG_PATH` → 项目 `node_modules/@vscode/ripgrep`
+  → VS Code 自带 → 本机 WorkBuddy 自带 → PATH；起不来或退出码 2 就落回自研扫描器（行为不变，
+  note 里会写「context/output_mode 未生效」）。**要长期稳定，建议 `yarn add @vscode/ripgrep`
+  并在 `electron-builder.yml` 里对该二进制 asarUnpack** —— 现在只是"碰巧能命中"。
+  两个实现细节：include 的 `-g` 必须排在 `!**/node_modules/**` 这类排除**之前**（rg 的 glob 后者覆盖前者）；
+  上下文行用 `行号-` 表示且**不占** `max_results` 名额。对应测试：`tests/grep-ripgrep.test.js`
+  （本机没有 rg 时整体 skip，不是失败）。
+- **编码按原编码读写**（`fs-safe.js` 的 detectEncoding）：BOM 优先 → 严格 UTF-8 → GBK。
+  UTF-16LE/BE 与 UTF-8 BOM 写回时保留原样；**GBK 只读不写**（Node 没有 GBK 编码器），
+  遇到就拒绝编辑并让用户先转 UTF-8 —— 绝不把中文写坏。对应测试：`tests/encoding.test.js`。
+- **`read_file` 默认带行号**（`行号<TAB>内容`，与 grep 的 `file:line` 同口径）；片段 >60K 字符时省略
+  （`lineNumbersOmitted`）；`line_numbers:false` 可关。⚠️ 行号不是文件内容，**绝不能抄进 `old_string`**
+  （系统提示词「代码编辑」段已写明）。对应测试：`tests/read-file-limit.test.js`。
+- **子代理也有了 spill + 折叠**（`sub-agent.js` 的 `spillResult` / `foldSubAgentResults`，
+  折叠窗口取「其他类」小值），且 `git` 现在可以用 `git -C <仓库> …`（`subagent-policy.js`
+  会跳过 `-C/-c/--git-dir/--no-pager` 等全局选项再找子命令 —— 之前是直接取 tokens[1]，
+  于是 `git -C` 被当成"非法子命令"，子代理里 git 等于完全不可用）。
+  对应测试：`tests/subagent-readonly.test.js`。
+- **编辑后自动 lint**（`quick-diag.js` 的 `lintFile`/`finalizeWrite`）：只在"同一层既有
+  `node_modules/.bin/eslint` 又有 eslint 配置"时跑 `--fix`（10s 预算，绝不 `npx`）。
+  `--fix` 会改写文件 → 此时**故意删掉 `diff`** 并给 `lintNote`（拿旧 diff 判断会比不给更糟）。
+  关掉：`settings.json` 里 `autoLintAfterEdit: false`。对应测试：`tests/quick-diag.test.js`。
+- **压缩阈值按窗口自适应**（`context.js`）：≥512K 窗口用 0.8，否则 0.6；摘要骨架新增
+  `## 工作状态`，并额外喂一段由 `chat.js:buildWorkState` 汇总的「清单 + 已改文件 + 最近失败命令」。
+
 ## 测试
 
 `tests/` 下是 node 直跑的单测（`node tests/xxx.test.js`）。判定失败归属的标准动作：

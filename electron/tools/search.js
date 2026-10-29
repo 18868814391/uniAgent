@@ -12,6 +12,7 @@
 // ============================================================
 const path = require('path')
 const fs = require('fs')
+const { execFile } = require('child_process')
 const state = require('../state')
 const { isPathAllowed } = require('./fs-safe')
 // 工作目录锚点（dev 角色）：不传 path 时默认在这里检索，而不是"第一个授权目录"
@@ -126,6 +127,139 @@ function maybeProgress(ctx) {
 //  grepCode —— 在目录中搜索文件内容（正则/关键词）
 //  异步 + 分批让路 + 预算；onProgress 可选，用于向渲染层播报进度。
 // ============================================================
+// ============================================================
+//  ripgrep 优先（P1-1，2026-10-24）
+//
+//  自研扫描器的硬伤（见文件头的时间预算说明）：15s / 2 万条目上限会**截断结果**，
+//  而模型对"结果不完整"的反应是换关键词再搜一遍 —— 这正是"第 20 轮还没开始改代码"的主因。
+//  同时它只有 `file:line:snippet` 一种输出，缺上下文行（判断 if 条件、函数签名必需）、
+//  缺 files/count 模式（"这个名字出现在几个文件里"要吃掉几十条结果）、缺 multiline。
+//
+//  这里优先调 ripgrep（本机 / 项目 node_modules / VS Code 自带），参数映射：
+//    output_mode=content → -n；files → --files-with-matches；count → --count-matches
+//    context → -C；multiline → -U --multiline-dotall；include → -g；默认 -i（与原实现一致）
+//  进程起不来或退出码 2（真错误）→ 返回 null，调用方落回自研扫描器，行为不变。
+// ============================================================
+let rgPathCache // undefined=未探测 / null=没有 / string=路径
+
+function rgCandidates() {
+  const local = process.env.LOCALAPPDATA || ''
+  const exe = process.platform === 'win32' ? 'rg.exe' : 'rg'
+  return [
+    // 1) 显式覆盖（用户在设置里指一个也走这里）
+    process.env.RG_PATH,
+    // 2) 项目依赖（推荐做法：`yarn add @vscode/ripgrep`，打包时记得 asarUnpack）
+    path.join(__dirname, '..', '..', 'node_modules', '@vscode', 'ripgrep', 'bin', exe),
+    path.join(__dirname, '..', '..', 'node_modules', '.bin', exe),
+    // 3) VS Code 自带（装了 VS Code 的机器基本都有）
+    local && path.join(local, 'Programs', 'Microsoft VS Code', 'resources', 'app', 'node_modules', '@vscode', 'ripgrep', 'bin', exe),
+    'C:\\Program Files\\Microsoft VS Code\\resources\\app\\node_modules\\@vscode\\ripgrep\\bin\\rg.exe',
+    // 4) 本机开发环境顺带命中（WorkBuddy 自带的 rg）—— 只是兜底，不能当正式依赖
+    local && path.join(local, 'Programs', 'WorkBuddy', 'resources', 'app.asar.unpacked', 'cli', 'vendor', 'ripgrep', 'x64-win32', exe),
+  ].filter(Boolean)
+}
+
+/** 探测 rg：显式/常见路径 → PATH。结果缓存（探测一次几十毫秒，不必每次重试）。 */
+function resolveRipgrep() {
+  if (rgPathCache !== undefined) return Promise.resolve(rgPathCache)
+  for (const c of rgCandidates()) {
+    try {
+      if (fs.existsSync(c)) {
+        rgPathCache = c
+        return Promise.resolve(c)
+      }
+    } catch { /* ignore */ }
+  }
+  return new Promise((resolve) => {
+    execFile('rg', ['--version'], { timeout: 1500, windowsHide: true }, (err) => {
+      rgPathCache = err ? null : 'rg'
+      resolve(rgPathCache)
+    })
+  })
+}
+
+function buildRgArgs({ pattern, dir, include, context, outputMode, multiline, caseSensitive }) {
+  const args = ['--no-heading', '--no-messages', '--max-columns', '200', '--max-columns-preview']
+  if (outputMode === 'files') args.push('--files-with-matches')
+  else if (outputMode === 'count') args.push('--count-matches')
+  else {
+    args.push('-n')
+    if (context > 0) args.push('-C', String(context))
+  }
+  if (multiline) args.push('-U', '--multiline-dotall')
+  if (caseSensitive === true) args.push('-s')
+  else args.push('-i')   // 与旧实现 `new RegExp(pattern, 'gi')` 保持一致：默认忽略大小写
+  // include 的 glob 必须排在排除规则**之前**：rg 的 glob 是"后者覆盖前者"，
+  // 反过来写（先排除 node_modules、再 -g '*.js'）会把 node_modules 里的 .js 又纳进来。
+  if (include) args.push('-g', include)
+  // 默认排除构建产物/依赖：ripgrep **不会**自动跳过 node_modules（那是 .gitignore 的职责），
+  // 不排除的话一次检索会翻遍依赖树 —— 与自研扫描器的 SKIP_DIRS 对齐。
+  for (const d of SKIP_DIRS) args.push('--glob', `!**/${d}/**`)
+  args.push('-e', String(pattern), '--', dir)
+  return args
+}
+
+/** 跑 rg 并整形。返回 null 表示"用不了，请落回自研扫描器"。 */
+function grepWithRipgrep(rg, { pattern, dir, resolved, include, maxResults, context, outputMode, multiline, caseSensitive }) {
+  return new Promise((resolve) => {
+    const args = buildRgArgs({ pattern, dir: resolved, include, context, outputMode, multiline, caseSensitive })
+    execFile(rg, args, { timeout: 20000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (err, stdout) => {
+      // rg 的退出码：0=有命中，1=没命中，2=真错误（参数错/权限）
+      const code = err && Number.isInteger(err.code) ? err.code : (err ? 2 : 0)
+      if (code === 2) return resolve(null)
+      const raw = String(stdout || '')
+      const lines = raw.split('\n').filter((l) => l !== '' && l !== '--')
+      const rel = (p) => path.relative(resolved, p).replace(/\\/g, '/')
+      const results = []
+      let matchCount = 0
+      for (const line of lines) {
+        if (outputMode === 'files') {
+          results.push(rel(line))
+          matchCount++
+        } else if (outputMode === 'count') {
+          // path:count
+          const idx = line.lastIndexOf(':')
+          if (idx > 0) results.push(`${rel(line.slice(0, idx))}:${line.slice(idx + 1)}`)
+          else results.push(line)
+          matchCount++
+        } else {
+          // content：命中行 `path:line:text`，上下文行 `path-line-text`
+          const m = /^(.*?):(\d+):(.*)$/.exec(line)
+          if (m) {
+            results.push(`${rel(m[1])}:${m[2]}: ${m[3].trim().slice(0, SNIPPET_LEN)}`)
+            matchCount++
+          } else {
+            const c = /^(.*?)-(\d+)-(.*)$/.exec(line)
+            // 上下文行不占 max_results 名额：它是命中行的附属信息，占了会让"命中数"名不副实
+            if (c) results.push(`${rel(c[1])}:${c[2]}- ${c[3].trim().slice(0, SNIPPET_LEN)}`)
+            continue
+          }
+        }
+        if (matchCount >= maxResults) break
+      }
+
+      const truncated = matchCount >= maxResults
+      const note = matchCount === 0
+        ? '没有找到匹配结果，可尝试换一个关键词或放宽 include 过滤。'
+        : `共找到 ${matchCount} 条匹配${truncated ? `（已达上限 ${maxResults}，可用 max_results 增大）` : ''}。`
+          + (outputMode === 'content' && context > 0
+            ? ' 行号后是 `-` 的是上下文行（不是命中行）。'
+            : '')
+
+      resolve(JSON.stringify({
+        success: true,
+        query: pattern,
+        directory: resolved,
+        engine: 'ripgrep',
+        matchCount,
+        results,
+        note,
+        ...(outputMode !== 'content' ? { outputMode } : {}),
+      }))
+    })
+  })
+}
+
 async function grepCode(args = {}, onProgress) {
   const { pattern, path: searchPath, include, max_results: maxResults = 30 } = args
   // 确定搜索目录
@@ -145,6 +279,29 @@ async function grepCode(args = {}, onProgress) {
   if (!fs.existsSync(resolved)) {
     return JSON.stringify({ success: false, error: `目录不存在: "${dir}"` })
   }
+
+  // 新参数（P1-1）：context / output_mode / multiline / case_sensitive。
+  // 只有 ripgrep 分支消费它们；落回自研扫描器时忽略（行为与旧版一致，并在 note 里说明）。
+  const context = Math.max(0, Math.min(10, Number(args.context) || 0))
+  const outputMode = ['content', 'files', 'count'].includes(args.output_mode) ? args.output_mode : 'content'
+  const multiline = args.multiline === true
+  const caseSensitive = args.case_sensitive === true
+
+  // 优先 ripgrep：快、尊重 .gitignore、支持上下文行与多模式
+  try {
+    const rg = await resolveRipgrep()
+    if (rg) {
+      const out = await grepWithRipgrep(rg, {
+        pattern, resolved, include, maxResults, context, outputMode, multiline, caseSensitive,
+      })
+      if (out) return out
+    }
+  } catch {
+    /* 落回自研扫描器 */
+  }
+  const fallbackNote = (context > 0 || outputMode !== 'content' || multiline)
+    ? '\n⚠️ 本机没有可用的 ripgrep，context / output_mode / multiline 这次未生效（已按内容模式全量扫描）。'
+    : ''
 
   // 编译搜索正则
   let regex
@@ -284,12 +441,14 @@ async function grepCode(args = {}, onProgress) {
     matches.length === 0
       ? `没有找到匹配结果，可尝试换一个关键词或放宽 include 过滤。` +
         (ctx.stopReason ? `注意：本次检索${reasonText}可能因此漏掉目标。` : '') +
-        (scopeHint ? ` ${scopeHint}` : '')
+        (scopeHint ? ` ${scopeHint}` : '') +
+        fallbackNote
       : `共找到 ${matches.length} 条匹配${reasonText}。` +
         (isStopped(ctx) || matches.length >= maxResults
           ? ` 递归遍历在 ${ctx.entries} 个目录项后中止，结果可能不完整——要精确找文件请用 glob_files 按文件名匹配，或缩小 path 范围。`
           : '') +
-        (scopeHint ? ` ${scopeHint}` : '')
+        (scopeHint ? ` ${scopeHint}` : '') +
+        fallbackNote
 
   return JSON.stringify({
     success: true,

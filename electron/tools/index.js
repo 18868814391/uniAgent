@@ -70,8 +70,8 @@ function normalizeImagePaths(singlePath, paths) {
 }
 
 const TOOL_HANDLERS = {
-  read_file: ({ path, offset, limit }) => {
-    const result = fsSafe.readFileWithRange(path, offset, limit)
+  read_file: ({ path, offset, limit, line_numbers }) => {
+    const result = fsSafe.readFileWithRange(path, offset, limit, { lineNumbers: line_numbers })
     return typeof result === 'string'
       ? JSON.stringify({ success: true, content: result })
       : JSON.stringify({ success: true, ...result })
@@ -126,12 +126,12 @@ const TOOL_HANDLERS = {
     // 写盘前留检查点（P0-7）：改坏了可以「撤销本轮改动」
     checkpoints.snapshotBeforeWrite(ctx && ctx.convId, ctx && ctx.turnId, path)
     const res = fsSafe.writeFileSafe(path, content, { requireRead })
-    return JSON.stringify({ success: true, result: await quickDiag.attachDiagnostics(res, res && res.path ? res.path : path) })
+    return JSON.stringify({ success: true, result: await quickDiag.finalizeWrite(res, res && res.path ? res.path : path) })
   },
   edit_file: async ({ path, old_string, new_string, replace_all }, ctx) => {
     checkpoints.snapshotBeforeWrite(ctx && ctx.convId, ctx && ctx.turnId, path)
     const res = fsSafe.editFileSafe(path, old_string, new_string, replace_all)
-    return JSON.stringify({ success: true, result: await quickDiag.attachDiagnostics(res, res && res.path ? res.path : path) })
+    return JSON.stringify({ success: true, result: await quickDiag.finalizeWrite(res, res && res.path ? res.path : path) })
   },
   // 检索类工具可能扫几万文件、耗时十几秒：把进度回调透传下去，
   // 渲染层在输入框上方显示「正在检索代码…」，避免"无反馈 = 像卡死"

@@ -78,11 +78,15 @@ function convert(schema) {
 const TOOLS = [
   {
     name: 'read_file',
-    description: "Read a file's ENTIRE content (the whole file by default). Read it ONCE and completely — do NOT split a file into small chunks. Only pass offset/limit when the file is genuinely huge and you need one specific region. Genuinely huge files (over ~8000 lines / 128 KB) are auto-truncated: the result then has truncated:true plus totalLines/nextOffset — continue from nextOffset instead of shrinking limit and guessing. Re-reading the same file with the same arguments returns no new information — it only wastes a turn.",
+    description: "Read a file's ENTIRE content (the whole file by default), with line numbers (format: `行号<TAB>内容`) so you can quote/point at exact lines. Read it ONCE and completely — do NOT split a file into small chunks. Only pass offset/limit when the file is genuinely huge and you need one specific region. Genuinely huge files (over ~8000 lines / 128 KB) are auto-truncated: the result then has truncated:true plus totalLines/nextOffset — continue from nextOffset instead of shrinking limit and guessing. Re-reading the same file with the same arguments returns no new information — it only wastes a turn. IMPORTANT: the line-number prefix is NOT part of the file content — never include it in edit_file's old_string.",
     schema: z.object({
       path: z.string().describe('Absolute path to the file'),
       offset: z.number().int().min(1).optional().describe('Start line number (1-based). Omit to read from the beginning — this is almost always what you want.'),
       limit: z.number().int().min(1).optional().describe('Max number of lines. Omit to read the whole file — this is almost always what you want.'),
+      line_numbers: z
+        .boolean()
+        .optional()
+        .describe('Prefix each line with its line number (default true). Pass false only when you need the raw text verbatim (e.g. copying a block wholesale).'),
     }),
   },
   {
@@ -134,20 +138,33 @@ const TOOLS = [
   {
     name: 'grep_code',
     description:
-      'Search file CONTENTS (regex or plain keyword) and return matching lines as "file:line:snippet". Use for locating where a function, field, URL or pattern appears across a codebase. IMPORTANT — always pass `path` (a specific repo/module directory such as "<repo>/your-backend-module" or "<repo>/src/pages/<route>") and pass `include` (e.g. "*.java", "*.xml", "*.vue"): searching a whole workspace (several repos, tens of thousands of files) is an order of magnitude slower and comes back truncated. Each call has a hard time budget; if the result says incomplete/truncated, do NOT repeat the same broad search — narrow `path`/`include` or use glob_files to locate the file by name first.',
+      'Search file CONTENTS (regex or plain keyword). Built on ripgrep when available (respects .gitignore, much faster on big repos). Default output: "file:line:snippet". Use `context` to also see surrounding lines (essential for judging an if-condition or a function signature without another read_file), `output_mode:"files"` to just list which files contain it, `output_mode:"count"` to count occurrences. IMPORTANT — pass `path` (a specific repo/module directory such as "<repo>/your-backend-module" or "<repo>/src/pages/<route>") and `include` (e.g. "*.java", "*.vue") whenever you know them: narrower scope is an order of magnitude faster. If the result says incomplete/truncated, do NOT repeat the same broad search — narrow `path`/`include`, or use glob_files to locate the file by name first.',
     schema: z.object({
       pattern: z.string().describe('Regex pattern or plain keyword to search for'),
       path: z
         .string()
         .optional()
         .describe(
-          'Directory to search in. ALWAYS set this to the specific repo/module directory. If omitted it defaults to the whole first allowed directory (very slow, easily truncated).'
+          'Directory to search in. Defaults to the session working directory (dev role). Set it to the specific repo/module directory when you know it — much faster.'
         ),
       include: z
         .string()
         .optional()
         .describe('File name filter glob, e.g. "*.java", "*.xml", "*.vue". Strongly recommended — without it every text file in the tree gets read.'),
       max_results: z.number().int().min(1).max(100).optional().describe('Max results to return (default 30)'),
+      context: z
+        .number()
+        .int()
+        .min(0)
+        .max(10)
+        .optional()
+        .describe('Also show N lines before/after each match (like grep -C). Context lines are rendered with a "-" after the line number. Use 2~5 to judge surrounding code without a separate read_file.'),
+      output_mode: z
+        .enum(['content', 'files', 'count'])
+        .optional()
+        .describe('content (default) = matching lines; files = only file paths containing the pattern; count = occurrence count per file.'),
+      multiline: z.boolean().optional().describe('Allow the pattern to span multiple lines (needed for things like "interface \\\\{[\\\\s\\\\S]*?field").'),
+      case_sensitive: z.boolean().optional().describe('Default false (case-insensitive). Pass true when case matters (e.g. distinguishing a class name from a variable).'),
     }),
   },
   {

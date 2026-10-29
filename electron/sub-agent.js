@@ -36,6 +36,56 @@ function callTool(tc, ctx) {
 
 const { getActiveProfile } = settings
 
+// ============================================================
+//  上下文削减（2026-10-24 补）—— 子代理原先**没有任何**削减机制
+//
+//  事故形态：子代理把某个目录 dump 一遍、或跑一条输出很大的只读命令，
+//  结果全量进 currentMessages，窗口直接顶爆 → 后面每一步都 400，
+//  而它只有 10 分钟墙钟兜底，主 Agent 等来的是"超时/半截结论"，白烧一整轮。
+//  主循环早就有的两件套（spill 落盘 + 更早结果折叠）在子代理里完全缺失。
+//
+//  折叠窗口取「其他类」的小值：子代理是只读检索角色，几乎全是 grep/read/ls 的结果，
+//  不像改码那样需要同时对照多份源码原文（那份大窗口只给主循环的 read_file）。
+// ============================================================
+const SUB_AGENT_TURN_START = 2   // currentMessages 前两条是 [system, user]
+const SUB_AGENT_FOLD_KEEP = 3    // 兜底窗口（取不到 chat 的窗口自适应函数时用）
+
+/** 单份结果超预算 → 原文落盘，请求里换成「首尾预览 + 路径」。失败一律回原文。 */
+function spillResult(convId, tc, content) {
+  try {
+    const spilled = spill.maybeSpillToolResult({
+      conversationId: convId,
+      toolName: tc.function.name,
+      callId: tc.id,
+      content,
+    })
+    return spilled !== null ? spilled : content
+  } catch {
+    return content
+  }
+}
+
+/** 折叠本轮更早的工具结果。同时把「本轮累计多少条被折掉」退化处理成不影响主流程。 */
+function foldSubAgentResults(messages, contextWindow) {
+  try {
+    // 顶层 require('./chat') 会踩加载期循环依赖（见文件头），这里调用时再取
+    const chat = require('./chat')
+    if (typeof chat.foldOldToolResults !== 'function') return 0
+    const keep = typeof chat.otherKeepForContext === 'function'
+      ? chat.otherKeepForContext(contextWindow)
+      : SUB_AGENT_FOLD_KEEP
+    return chat.foldOldToolResults(
+      messages,
+      SUB_AGENT_TURN_START,
+      keep,
+      chat.TOOL_RESULT_FOLD_MIN,
+      { contextWindow },
+    )
+  } catch {
+    return 0
+  }
+}
+
 // 子代理的工具循环**没有步数上限**（2026-10-05）：改由墙钟超时（下方 SUB_AGENT_TIMEOUT_MS）
 // 与「进展停滞收口」（loopPolicy）双保险。原来的 30 轮硬上限会把「读得慢但一直在推进」
 // 的检索任务平白掐断，而又没有超时那样的部分成果兜底语义。
@@ -57,6 +107,8 @@ const BLOCKED_TOOLS = subagentPolicy.BLOCKED_TOOLS
 // 子代理额外有 10 分钟墙钟上限（见 SUB_AGENT_TIMEOUT_MS），但**没有步数上限** ——
 // 收口只发生在「连续多轮没拿到新信息」时（子代理是只读检索角色，原地打转是典型失败形态）。
 const loopPolicy = require('./tool-loop-policy')
+// 超大工具结果落盘（2026-10-24 补）：子代理原先没有任何削减机制，见下方 foldSubAgentResults 注释
+const spill = require('./spill')
 
 /**
  *  从工具结果里拼一段「已完成工作摘要」。两个用途：
@@ -134,6 +186,7 @@ function runSubAgentLoop({ subAgentId, task, description, convId, sender, parent
     '- `list_directory` 看目录结构；`execute_command` 只放行**只读命令**',
     '  （`ls`/`cat`/`head`/`tail`/`wc`/`grep`/`rg`/`git log`/`git diff`/`git status` 等，',
     '  含 `> | ; & $ ` 等 shell 元字符的一律被拒）。',
+    '  **子代理不能 `cd`**（会被拒）。要看某个仓库的 git 历史，一律写成 `git -C <仓库绝对路径> log --oneline -20` 这种形态。',
     '- 只读原则（**由应用强制执行，不是建议**）：不要创建、修改、删除任何文件。',
     '  `write_file` / `edit_file` / `delete_file` / `write_skill` / `write_memory` 都不会下发给你；',
     '  即使硬凑出工具名也会被直接拒绝。需要落盘的改动，写进你的最终回答交给主 Agent 去做。',
@@ -296,7 +349,6 @@ function runSubAgentLoop({ subAgentId, task, description, convId, sender, parent
 
         // 无工具调用 → 循环结束
         if (toolCalls.length === 0) break
-
         // 构建带 tool_calls 的 assistant 消息
         const assistantMsg = { role: 'assistant', content: responseContent || null }
         assistantMsg.tool_calls = toolCalls.map(tc => ({
@@ -323,9 +375,14 @@ function runSubAgentLoop({ subAgentId, task, description, convId, sender, parent
           currentMessages.push({
             role: 'tool',
             tool_call_id: tc.id,
-            content: result,
+            // 超大结果先落盘换成「首尾预览 + 路径」（spill），再由下方 fold 折叠更早的条数。
+            // 顺序不能反：fold 折的是"本轮更早的条数"，spill 换进去的预览本身很短、不会命中阈值。
+            content: spillResult(convId, tc, result),
           })
         }
+
+        // 折叠本轮更早的工具结果（2026-10-24 补）
+        foldSubAgentResults(currentMessages, profile.contextWindow)
 
         // 收口中间件：本轮有「此前没用过的 (工具名, 参数)」才算有进展。
         // 子代理是只读检索角色，原地打转（反复扫同一处）是它的典型失败形态。

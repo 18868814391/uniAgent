@@ -87,3 +87,19 @@ test('诊断自身出问题也不影响写盘结果（不抛异常）', async ()
   assert.equal(r.diagnostics, undefined)
   assert.equal(await diagnoseFile({ not: 'a path' }), null)
 })
+
+// ---------------- 自动 lint（P1-6，2026-10-24） ----------------
+// 口径：只跑项目内 eslint（node_modules/.bin）且必须有配置；没有就静默跳过。
+// 这里只验"跳过"分支 —— 真跑 eslint 需要装依赖，不适合单测。
+
+test('lintFile：非前端扩展名 / 没有项目 eslint 时静默跳过', async () => {
+  const { lintFile, finalizeWrite } = require(path.join(__dirname, '..', 'electron', 'tools', 'quick-diag.js'))
+  assert.equal(await lintFile(write('a.md', '# hi')), null, 'md 不 lint')
+  assert.equal(await lintFile(write('b.js', 'const a = 1\n')), null, '临时目录没有 node_modules/.bin/eslint')
+
+  const res = { path: write('c.js', 'const a = 1\n'), replacedCount: 1 }
+  const out = await finalizeWrite(res, res.path)
+  assert.equal(out.lint, undefined, '没有 eslint 时不该凭空造出 lint 字段')
+  assert.equal(out.lintFixed, undefined)
+  assert.equal(out.diff, undefined, '本用例只验证不新增字段')
+})

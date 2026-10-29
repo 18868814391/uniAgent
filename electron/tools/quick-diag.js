@@ -275,10 +275,150 @@ async function attachDiagnostics(result, filePath) {
   return result
 }
 
+// ------------------------------------------------------------
+//  编辑后自动 lint（P1-6，2026-10-24）
+//
+//  为什么放在应用侧而不是让模型自己跑：模型每次都要判断"这个项目该跑什么、配置文件在哪"，
+//  判断错了就白烧一轮；而"改完顺手 lint 一下"是每次编辑都该做的事，配一次就够了。
+//
+//  三条边界（比"自动格式化"这个说法重要）：
+//   ① **只跑项目内的 eslint**（`node_modules/.bin/eslint`），且必须有配置文件 ——
+//      绝不 `npx eslint`（会联网下载，慢且可能装出个不同版本）；
+//   ② 10s 预算 + 只对 .js/.ts/.vue 等前端文件生效，二进制/大文件不碰；
+//   ③ `--fix` 会**改写文件**，所以必须把"文件被改写过"如实告诉模型 ——
+//      否则它会拿着改写前的 diff 做判断（见 finalizeWrite 里清掉 diff 的处理）。
+// ------------------------------------------------------------
+const LINT_BUDGET_MS = 10000
+const LINT_MAX_BYTES = 512 * 1024
+const LINT_EXTS = new Set(['.js', '.cjs', '.mjs', '.jsx', '.ts', '.tsx', '.vue'])
+const ESLINT_CONFIGS = [
+  '.eslintrc', '.eslintrc.js', '.eslintrc.cjs', '.eslintrc.json', '.eslintrc.yml', '.eslintrc.yaml',
+  'eslint.config.js', 'eslint.config.mjs', 'eslint.config.cjs',
+]
+
+/**
+ * 向上找「同一层既有 eslint、又有配置」的项目根。
+ * 返回 eslint 的 **JS 入口**（`node_modules/eslint/bin/eslint.js`），而不是 `.bin/eslint.cmd` ——
+ * Windows 上 execFile 起不了 `.cmd`（EINVAL），必须用 node 直接跑 JS 入口。
+ */
+function findProjectEslint(file) {
+  let dir = path.dirname(file)
+  for (let i = 0; i < 12; i++) {
+    const entry = path.join(dir, 'node_modules', 'eslint', 'bin', 'eslint.js')
+    if (fs.existsSync(entry)) {
+      const hasConfig = ESLINT_CONFIGS.some((n) => fs.existsSync(path.join(dir, n)))
+        || (() => {
+          try {
+            return !!JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf-8')).eslintConfig
+          } catch {
+            return false
+          }
+        })()
+      if (hasConfig) return entry
+    }
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return null
+}
+
+/** 跑一次 eslint --fix，返回 {fixed, errors, warnings, messages} 或 null（不适用/跳过）。 */
+function lintFile(filePath) {
+  return new Promise((resolve) => {
+    try {
+      const abs = path.resolve(filePath)
+      if (!LINT_EXTS.has(path.extname(abs).toLowerCase())) return resolve(null)
+      const st = fs.statSync(abs)
+      if (!st.isFile() || st.size === 0 || st.size > LINT_MAX_BYTES) return resolve(null)
+      const entry = findProjectEslint(abs)
+      if (!entry) return resolve(null)
+
+      execFile(
+        process.execPath,
+        [entry, '--fix', '--format', 'json', abs],
+        {
+          timeout: LINT_BUDGET_MS,
+          maxBuffer: 4 * 1024 * 1024,
+          windowsHide: true,
+          cwd: path.dirname(path.dirname(path.dirname(entry))),   // 项目根（node_modules 的上一层）
+          // Electron 主进程里 process.execPath 是 electron.exe，加这个才退化成 node
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+        },
+        (err, stdout) => {
+          // eslint 退出码：0=干净，1=仍有 error/warning，2=配置/参数错
+          const code = err && Number.isInteger(err.code) ? err.code : (err ? 2 : 0)
+          if (code === 2) return resolve(null)
+          let report = null
+          try {
+            const arr = JSON.parse(String(stdout || '[]'))
+            report = Array.isArray(arr) && arr[0] ? arr[0] : null
+          } catch {
+            return resolve(null)
+          }
+          if (!report) return resolve(null)
+          const messages = (report.messages || [])
+            .filter((m) => m && m.severity >= 1)
+            .slice(0, 10)
+            .map((m) => ({
+              line: Number.isInteger(m.line) ? m.line : null,
+              severity: m.severity === 2 ? 'error' : 'warning',
+              ruleId: m.ruleId || null,
+              message: String(m.message || '').replace(/\s+/g, ' ').slice(0, 200),
+            }))
+          resolve({
+            fixed: !!report.output,   // eslint 仅在 --fix 真的改动了文件时才回 output
+            errors: messages.filter((m) => m.severity === 'error').length,
+            warnings: messages.filter((m) => m.severity === 'warning').length,
+            messages,
+          })
+        },
+      )
+    } catch {
+      resolve(null)
+    }
+  })
+}
+
+/**
+ * 写盘后的统一收尾：语法/编译诊断 + 项目内 eslint --fix（可按设置关掉）。
+ * 两条都可能"没有结果"，此时**不加任何字段**（省 token）。
+ */
+async function finalizeWrite(result, filePath) {
+  const target = filePath || (result && result.path)
+  await attachDiagnostics(result, target)
+  if (!result || typeof result !== 'object') return result
+  let enabled = true
+  try {
+    const state = require('../state')
+    enabled = !state.settings || state.settings.autoLintAfterEdit !== false
+    if (state.settings && state.settings.role !== 'dev') enabled = false
+  } catch {
+    enabled = true
+  }
+  if (!enabled) return result
+  const lint = await lintFile(target)
+  if (!lint) return result
+  if (lint.messages.length > 0) {
+    result.lint = { errors: lint.errors, warnings: lint.warnings, messages: lint.messages }
+  }
+  if (lint.fixed) {
+    // --fix 改写了文件：原来的 diff 已经和磁盘不一致，宁可不给，也不能给错的
+    delete result.diff
+    delete result.diffTruncated
+    result.lintFixed = true
+    result.lintNote = 'eslint --fix 已自动修正该文件（缩进/引号/分号之类），上面的内容不是最终形态；'
+      + '需要精确内容请 read_file 复核（本次会话读过即可，不必重复读）。'
+  }
+  return result
+}
+
 module.exports = {
   BUDGET_MS,
   MAX_ERRORS,
   CHECKERS,
   diagnoseFile,
   attachDiagnostics,
+  finalizeWrite,
+  lintFile,
 }

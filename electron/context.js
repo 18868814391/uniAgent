@@ -18,6 +18,10 @@ const { readToolActivity, renderToolActivity } = require('./tool-activity')
 // ============================================================
 const LAST_ROUNDS_KEPT = 3            // 保留的最近完整轮次（用户回合）
 const CONTEXT_BUDGET_FACTOR = 0.6     // 触发压缩的总上下文预算占比（给输出与工具循环留余量）
+// 大窗口模型（1M）用 0.6 太保守：600K 才压缩，压一次既慢又贵，而且压缩完能留下的
+// 最近轮次反而更少。1M 窗口给到 0.8（800K），把"失忆"推后、把压缩次数降下来。
+const LARGE_WINDOW_THRESHOLD = 512 * 1024
+const CONTEXT_BUDGET_FACTOR_LARGE = 0.8
 const RECENT_BUDGET_FACTOR = 0.4      // "最近N轮"单独最多占窗口的比例（防单轮超大）
 const SUMMARY_MAX_TOKENS = 1200       // 摘要生成 max_tokens
 // 摘要长度：超过 ACCEPT_MAX 视为异常（模型跑飞），截断保留而不是整份丢弃 ——
@@ -149,13 +153,18 @@ function serializeMessagesForSummary(msgs) {
 
 // 用模型把更早历史 + 上一版摘要 + 工具活动台账压缩成一份新摘要（JSON mode）。
 // 失败返回 null，调用方走启发式兜底。
-async function summarizeHistory({ key, model, oldSummary, crossed, activityText, signal, onRetry }) {
+async function summarizeHistory({ key, model, oldSummary, crossed, activityText, workState, signal, onRetry }) {
   const oldPart = oldSummary ? `【上一版摘要（请继承其要点，不要遗漏既有结论）】\n${oldSummary}\n\n` : ''
   // 工具活动台账：历史 messages 里**没有**工具调用与结果（渲染层只落 { role, content }），
   // 不带上这一段，摘要出来的就是「聊了什么」而不是「做了什么」—— 压缩后模型会重复读同一个文件、
   // 甚至覆盖已完成的改动。详见 electron/tool-activity.js 头部。
   const activityPart = activityText
     ? `【本次要压缩的这段时间里，AI 实际执行过的工具操作（按时间顺序，✗ 表示失败）】\n${activityText}\n\n`
+    : ''
+  // 工作状态（2026-10-24 补）：清单 + 已改文件 + 最近一次失败的校验。
+  // 台账给的是"做过什么"，这一块给的是"现在处在什么状态" —— 压缩后接着干靠的是后者。
+  const workPart = workState
+    ? `【当前工作状态（系统自动汇总；清单项、文件路径、失败命令必须原样落进摘要）】\n${workState}\n\n`
     : ''
   const data = await callJson({
     key,
@@ -171,6 +180,8 @@ async function summarizeHistory({ key, model, oldSummary, crossed, activityText,
           '**必须按下面这个固定骨架输出**（小节标题原样保留，没有内容的小节写「无」）：\n' +
           '## 用户诉求（当前任务的整体目标与约束）\n' +
           '## 已完成（含改了哪些文件的**绝对路径**、关键改动内容）\n' +
+          '## 工作状态（任务清单每项的 [x]/[~]/[ ] 状态、已改文件清单、最近一次失败的校验命令与错误；' +
+          '没有就写「无」）\n' +
           '## 未完成（明确的待办与卡点）\n' +
           '## 关键文件与位置（绝对路径 / 函数名 / 类名 / 字段名，逐字保留，不要概括）\n' +
           '## 关键结论与决策（已确认的事实、口径、参数）\n' +
@@ -182,7 +193,7 @@ async function summarizeHistory({ key, model, oldSummary, crossed, activityText,
       },
       {
         role: 'user',
-        content: `${oldPart}${activityPart}【新增的历史对话】\n${serializeMessagesForSummary(crossed)}`,
+        content: `${oldPart}${activityPart}${workPart}【新增的历史对话】\n${serializeMessagesForSummary(crossed)}`,
       },
     ],
   })
@@ -245,12 +256,14 @@ function deleteConvSummary(id) {
 
 // 上下文压缩入口：仅在超阈值时执行，返回压缩后的 currentMessages（system + 最近轮次）；
 // 未超阈值返回 null，调用方用原始 messages 组装。signal 用于支持压缩期间被"停止"中断。
-async function maybeCompactHistory({ event, conversationId, messages, apiKey, model, systemContent, contextWindow, signal }) {
+async function maybeCompactHistory({ event, conversationId, messages, apiKey, model, systemContent, contextWindow, signal, workState }) {
   // ⚠️ 必须用调用方传来的 contextWindow（= 本次请求所用 profile 的窗口），不能读全局
   // state.settings.contextWindow —— 那是「当前激活 profile」的窗口，多模型配置下两者不同 →
   // 折叠用对了窗口、压缩用错了窗口，阈值失配。
   const windowTokens = getModelContextWindow(model, contextWindow)
-  const triggerBudget = Math.floor(windowTokens * CONTEXT_BUDGET_FACTOR)
+  // 阈值按窗口自适应：大窗口（≥512K）用 0.8，小窗口仍用 0.6（那里 prefill 预算才真紧）
+  const factor = windowTokens >= LARGE_WINDOW_THRESHOLD ? CONTEXT_BUDGET_FACTOR_LARGE : CONTEXT_BUDGET_FACTOR
+  const triggerBudget = Math.floor(windowTokens * factor)
   const recentBudget = Math.floor(windowTokens * RECENT_BUDGET_FACTOR)
   const existingSummary = readConvSummary(conversationId)
   // 工具定义随每次请求发送，固定占用一部分预算，计入触发判断
@@ -282,6 +295,7 @@ async function maybeCompactHistory({ event, conversationId, messages, apiKey, mo
       oldSummary: existingSummary,
       crossed,
       activityText,
+      workState,
       signal,
       onRetry: (attempt, delayMs, status) => {
         event.sender.send('chat:status', {

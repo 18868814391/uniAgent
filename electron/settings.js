@@ -277,6 +277,9 @@ function loadSettings() {
     memoryDir: typeof raw.memoryDir === 'string' ? raw.memoryDir : DEFAULT_MEMORY_DIR,
     allowedDirs: Array.isArray(raw.allowedDirs) ? raw.allowedDirs.filter(d => typeof d === 'string') : [],
     autoExecute: typeof raw.autoExecute === 'boolean' ? raw.autoExecute : true,
+    // 编辑后自动 lint（dev 角色）：项目内既有 eslint 又有配置时才跑 --fix（见 tools/quick-diag.js）。
+    // 默认开；不想让它动文件就在 settings.json 里写 false。
+    autoLintAfterEdit: typeof raw.autoLintAfterEdit === 'boolean' ? raw.autoLintAfterEdit : true,
     // 长任务结束时的系统通知（屏幕右下角横幅）——**正常完成与异常结束都提醒**，只有
     // 「用户自己点中断」不提醒。用户切走去干别的事时，这是唯一能告诉他"跑完了 / 挂了"
     // 的渠道，因此**恒为开启、设置页已撤下开关**（2026-10-08）。老 settings.json 里遗留的
@@ -554,6 +557,8 @@ Key capabilities:
 - 精确编辑 → edit_file(path, old_string, new_string)  # str_replace 方式精确替换
 - 先用 read_file **一次读完整个文件**（默认就返回全文）→ 找到要修改的部分 → 用 edit_file 精确替换
 - old_string 必须是文件中的精确原文（含缩进和空格），确保唯一匹配
+- **read_file 返回的每行前面有「行号<TAB>」**（与 grep_code 的 file:line 口径一致）：那是给你定位用的，
+  **不属于文件内容** —— 写 old_string 时绝不能把行号抄进去
 - 只改几行时绝不重写整个文件，优先用 edit_file；大段重写才用 write_file
 - **读文件要一次读完、不要分块**：read_file 默认就返回整个文件。不要用 offset/limit 把文件切成几十段读
   —— 那样读一个 400 行的文件要花几十次工具调用，往返次数和上下文都会被浪费掉。只有文件确实巨大

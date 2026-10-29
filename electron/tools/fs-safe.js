@@ -246,6 +246,87 @@ function fileNotFoundError(filePath, resolved) {
   return new Error(msg)
 }
 
+// ============================================================
+//  编码检测（2026-10-24，P1-3）
+//
+//  旧实现无条件 `readFileSync(..., 'utf-8')`：
+//   · GBK 的 `.java` / 老 `.vue` 会被读成满屏乱码，而模型会"照着乱码改"，
+//     `edit_file` 再把乱码写回去 → **文件被损坏**（且它自己完全不知道）；
+//   · UTF-16LE（Windows 上不少导出文件、注册表导出、部分 .reg/.ini）同理。
+//  现在：读之前先判编码，写回时**沿用原编码**；判不出来或编不回去（GBK 无编码器）
+//  就明确拒绝编辑 —— 宁可不改，也不要把用户的文件改坏。
+// ============================================================
+const encodingState = new Map()   // absPath -> { enc, at }
+const WRITABLE_ENCODINGS = new Set(['utf8', 'utf8bom', 'utf16le', 'utf16be'])
+
+/** 判编码：BOM 优先 → 严格 UTF-8 → GBK → null（认不出）。 */
+function detectEncoding(buf) {
+  if (!buf || buf.length === 0) return 'utf8'
+  if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) return 'utf8bom'
+  const b1 = buf.length > 1 ? buf[1] : -1
+  if (buf[0] === 0xff && b1 === 0xfe) return 'utf16le'
+  if (buf[0] === 0xfe && b1 === 0xff) return 'utf16be'
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(buf)
+    return 'utf8'
+  } catch {
+    /* 不是合法 UTF-8，继续试 GBK */
+  }
+  try {
+    const text = new TextDecoder('gbk', { fatal: true }).decode(buf)
+    return text.includes('\uFFFD') ? null : 'gbk'
+  } catch {
+    return null
+  }
+}
+
+function decodeBuffer(buf, enc) {
+  if (enc === 'utf8bom') return new TextDecoder('utf-8').decode(buf.subarray(3))
+  if (enc === 'utf16le') return new TextDecoder('utf-16le').decode(buf.subarray(2))
+  if (enc === 'utf16be') return new TextDecoder('utf-16be').decode(buf.subarray(2))
+  if (enc === 'gbk') return new TextDecoder('gbk').decode(buf)
+  return new TextDecoder('utf-8').decode(buf)
+}
+
+/** 按原编码编码回 Buffer（含 BOM）。只对 WRITABLE_ENCODINGS 调。 */
+function encodeText(text, enc) {
+  if (enc === 'utf8bom') return Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(text, 'utf-8')])
+  if (enc === 'utf16le') return Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, 'utf16le')])
+  if (enc === 'utf16be') {
+    const body = Buffer.from(text, 'utf16le')
+    body.swap16()
+    return Buffer.concat([Buffer.from([0xfe, 0xff]), body])
+  }
+  return Buffer.from(text, 'utf-8')
+}
+
+/** 取（或探测）某个已存在文件的编码。读不到就按 utf8 处理。 */
+function encodingOf(resolved) {
+  const rec = encodingState.get(resolved)
+  if (rec) return rec.enc
+  try {
+    return detectEncoding(fs.readFileSync(resolved)) || 'unknown'
+  } catch {
+    return 'utf8'
+  }
+}
+
+/**
+ * 写盘前确认这个文件**能被安全写回**。
+ * GBK / 认不出的编码 → 抛错并给可执行建议（转 UTF-8 后再改，或由用户手动应用）。
+ */
+function assertWritableEncoding(resolved, displayPath) {
+  const enc = encodingOf(resolved)
+  if (WRITABLE_ENCODINGS.has(enc)) return enc
+  const label = enc === 'gbk' ? 'GBK/GB18030' : '未知编码'
+  throw new Error(
+    `"${displayPath}" 不是 UTF-8（检测为 ${label}）。本工具只能用 UTF-8 / UTF-16 写回，`
+    + '直接写会把中文变成乱码、把文件改坏。请二选一：'
+    + '① 让用户先在编辑器里把它转成 UTF-8（VS Code 右下角编码 → Save with Encoding → UTF-8），你再改；'
+    + '② 你只给出改动方案（改哪一行、改成什么），由用户手动应用。',
+  )
+}
+
 function readFileSafe(filePath) {
   const resolved = path.resolve(filePath)
   if (!isPathAllowed(resolved)) {
@@ -271,7 +352,10 @@ function readFileSafe(filePath) {
       + `（read_image 需要当前模型配置勾选「支持读图（多模态）」；未勾选时它会明确告诉你。）`,
     )
   }
-  let content = fs.readFileSync(resolved, 'utf-8')
+  const buf = fs.readFileSync(resolved)
+  const enc = detectEncoding(buf) || 'unknown'
+  encodingState.set(resolved, { enc, at: Date.now() })
+  let content = decodeBuffer(buf, enc)
   // harness 物料库中的 {{TOKEN}} 占位符替换为真实路径，供 AI 读取约定时直接使用
   // 严格子目录判定（与 isPathAllowed 保持一致），避免兄弟目录被误判为 harness 内文件。
   const harnessRoot = path.resolve(HARNESS_ROOT)
@@ -295,6 +379,14 @@ function readFileSafe(filePath) {
 // 所以按**真正的成本指标（字符数 ≈ token）**来卡，行数上限只作兜底（防病态的「10 万行单字符」）：
 const READ_MAX_LINES = 8000        // 兜底：防病态超多行（正常源码文件不会碰到）
 const READ_MAX_CHARS = 128 * 1024  // 真正的闸：约 4 万 token（ASCII），足以一次读完大页面
+// 加行号的片段上限：行号前缀约 5~7% 字符，片段再大就不值得（改用 grep 定位）
+const LINE_NO_MAX_CHARS = 60000
+
+/** 给文本每行加 `行号\t` 前缀（与 grep 的 file:line 口径一致）。 */
+function withLineNumbers(text, startLine) {
+  if (!text) return text
+  return text.split('\n').map((line, i) => `${startLine + i}\t${line}`).join('\n')
+}
 
 // ============================================================
 //  读状态登记（2026-10-24，P0-5）—— 覆盖已存在的文件前，先确认"读过没有 / 读后被改没有"
@@ -402,7 +494,7 @@ function staleReadInfo(resolved) {
  * 返回：整份文件且未超限 → 裸字符串（与原行为完全一致）；
  * 传了 offset/limit、或内容超限 → { content, totalLines, offset, limit, truncated, nextOffset?, note? }。
  */
-function readFileWithRange(filePath, offset, limit) {
+function readFileWithRange(filePath, offset, limit, opts = {}) {
   const content = readFileSafe(filePath)
   const lines = content.split('\n')
   const totalLines = lines.length
@@ -442,7 +534,10 @@ function readFileWithRange(filePath, offset, limit) {
   // 整份文件、未超限、调用方也没要分段 → 与旧行为逐字节一致（裸字符串）
   if (!hasOffset && !hasLimit && !truncated) {
     markRead(path.resolve(filePath), true)   // 完整读过 → 允许之后整篇覆盖
-    return content
+    if (opts.lineNumbers === false) return content
+    const numbered = withLineNumbers(content, 1)
+    // 行号本身要占 5~7% 字符：贴着上限的大文件就不加了（否则会把结果顶出预算）
+    return numbered.length > READ_MAX_CHARS ? content : numbered
   }
 
   const result = {
@@ -451,6 +546,16 @@ function readFileWithRange(filePath, offset, limit) {
     offset: start + 1,
     limit: end - start,
     truncated,
+  }
+  // 行号（与 grep_code 的 `file:line:snippet` 同一口径）：模型拿着「第 412 行」能直接在结果里定位，
+  // 不必再按 offset 数字行。片段过大时不加（行号要占 5~7% 字符），并说明用 grep 定位。
+  if (opts.lineNumbers !== false) {
+    if (sliced.length <= LINE_NO_MAX_CHARS) {
+      result.content = withLineNumbers(sliced, start + 1)
+      result.lineNumbers = true
+    } else {
+      result.lineNumbersOmitted = '片段较大，本次未加行号；要按行号定位请用 grep_code'
+    }
   }
   if (lineTruncated) {
     result.lineTruncated = true
@@ -659,15 +764,18 @@ function writeFileSafe(filePath, content, opts = {}) {
   const existed = fs.existsSync(resolved)
   // 覆盖已存在的文件前：dev 角色要求"读过、且读后没被别人改过"（见上方 readState 段）
   if (existed && opts.requireRead) assertReadBeforeOverwrite(resolved, filePath)
+  // 编码：覆盖时沿用原编码；GBK / 认不出的编码写不回去 → 直接拒绝（别把中文写坏）
+  const enc = existed ? assertWritableEncoding(resolved, filePath) : 'utf8'
   let prev = ''
   if (existed) {
     try {
-      prev = fs.readFileSync(resolved, 'utf-8')
+      prev = decodeBuffer(fs.readFileSync(resolved), enc)
     } catch {
       prev = ''
     }
   }
-  fs.writeFileSync(resolved, content, 'utf-8')
+  fs.writeFileSync(resolved, encodeText(content, enc))
+  encodingState.set(resolved, { enc, at: Date.now() })
   markWritten(resolved)
   // 记账：AI 新建的文件（或已在册的 AI 文件被再次写入）→ 之后删它 / 覆盖它不弹确认框
   noteAiWrite(resolved, !existed)
@@ -780,7 +888,8 @@ function editFileSafe(filePath, oldString, newString, replaceAll = false) {
   if (stat.size > 10 * 1024 * 1024) {
     throw new Error(`File too large (max 10MB): "${filePath}"`)
   }
-  const content = fs.readFileSync(resolved, 'utf-8')
+  const enc = assertWritableEncoding(resolved, filePath)
+  const content = decodeBuffer(fs.readFileSync(resolved), enc)
   // 软提示：没读过 / 读后被改过 → 结果里带 staleRead（不阻断，本函数在磁盘原文上替换）
   const readInfo = staleReadInfo(resolved)
 
@@ -811,7 +920,8 @@ function editFileSafe(filePath, oldString, newString, replaceAll = false) {
     const newContent = replaceAll
       ? content.split(oldString).join(newString)
       : content.replace(oldString, () => newString)
-    fs.writeFileSync(resolved, newContent, 'utf-8')
+    fs.writeFileSync(resolved, encodeText(newContent, enc))
+    encodingState.set(resolved, { enc, at: Date.now() })
     markWritten(resolved)
     noteAiWrite(resolved, false) // 已是 AI 的草稿 → 刷新记账；用户自己的文件不会被记上
     const exact = { path: resolved, replacedCount: replaceAll ? count : 1, size: Buffer.byteLength(newContent, 'utf-8'), ...readInfo }
@@ -840,7 +950,8 @@ function editFileSafe(filePath, oldString, newString, replaceAll = false) {
     } else {
       newContent = replaceLinesAt(content, lineHits[0], lineCount, newString)
     }
-    fs.writeFileSync(resolved, newContent, 'utf-8')
+    fs.writeFileSync(resolved, encodeText(newContent, enc))
+    encodingState.set(resolved, { enc, at: Date.now() })
     markWritten(resolved)
     noteAiWrite(resolved, false)
     const eolResult = {

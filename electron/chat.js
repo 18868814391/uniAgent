@@ -222,6 +222,49 @@ function checkpointInfo(convId, turnId) {
 }
 
 /**
+ * 「工作状态」摘要（P1-5，2026-10-24）—— 压缩时喂给摘要器的那一段。
+ *
+ * 台账（tool-activity）记的是"按时间顺序做过什么"，模型压缩后仍会丢一件事：
+ * **现在到哪一步了**。所以这里补三样：清单进度、本会话改过的文件、最近一次失败的命令。
+ * 三样都能从既有 sidecar 直接取，不必新开存储（session-log 里也有，但那是全量消息，太重）。
+ *
+ * 任何异常都降级为空串 —— 压缩是主流程，工作状态是锦上添花。
+ */
+function buildWorkState(convId) {
+  try {
+    const parts = []
+
+    const todos = todo.getTodos(convId)
+    if (Array.isArray(todos) && todos.length > 0) {
+      const mark = (s) => (s === 'completed' ? 'x' : s === 'in_progress' ? '~' : ' ')
+      parts.push('【任务清单】\n' + todos.map((t) => `- [${mark(t.status)}] ${t.text}`).join('\n'))
+    }
+
+    const acts = toolActivity.readToolActivity(convId)
+    const touched = new Map()
+    for (const a of acts) {
+      if (!a || !a.target || a.ok === false) continue
+      if (a.tool === 'write_file' || a.tool === 'edit_file' || a.tool === 'delete_file') {
+        touched.set(a.target, a.note || a.tool)
+      }
+    }
+    if (touched.size > 0) {
+      const list = [...touched.entries()].slice(-15).map(([p, note]) => `- ${p}（${note}）`)
+      parts.push('【本会话改过的文件】\n' + list.join('\n'))
+    }
+
+    const lastFail = [...acts].reverse().find((a) => a && a.ok === false && a.tool === 'execute_command')
+    if (lastFail) {
+      parts.push(`【最近一次失败的命令】\n${lastFail.target}\n${lastFail.note || ''}`.trim())
+    }
+
+    return parts.join('\n\n')
+  } catch {
+    return ''
+  }
+}
+
+/**
  * 事实原文类工具的「同一目标」去重键。
  *
  * 模型有个高频习惯：同一个文件反复读（"最后确认一下"），每次都是几百行全文。
@@ -950,6 +993,9 @@ async function handleChatSend(event, { conversationId, messages, profileId, enab
       systemContent,
       signal: controller.signal,
       contextWindow: requestContextWindow,
+      // 工作状态（P1-5）：清单 + 本会话改过的文件 + 最近一次失败的命令。
+      // 台账说的是"做过什么"，这块说的是"现在到哪一步了"，压缩后接着干靠后者。
+      workState: buildWorkState(conversationId),
     })
     // 压缩期间被中断：必须发终态事件（不再静默 return），否则渲染层会永远停在"生成中"
     if (abortedBy || run.stopRequested || controller.signal.aborted) {
